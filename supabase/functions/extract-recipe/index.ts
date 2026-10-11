@@ -14,9 +14,10 @@ import sample from './sample.json' with { type: 'json' };
 
 // Model cascade: the configured model first, then fallbacks on quota / overload / timeout.
 // Free-tier keys have no quota on the Pro preview, and Flash returns 503 at peak; the next model beats failing.
+// (gemini-2.5-flash is closed to new API users and returns 404.)
 const MODELS = [...new Set([
   Deno.env.get('GEMINI_EXTRACT_MODEL') ?? 'gemini-3.1-pro-preview',
-  ...(Deno.env.get('GEMINI_FALLBACK_MODELS') ?? 'gemini-3.8-flash,gemini-2.5-flash').split(',').map(s => s.trim()).filter(Boolean),
+  ...(Deno.env.get('GEMINI_FALLBACK_MODELS') ?? 'gemini-3.8-flash,gemini-3.5-flash-lite').split(',').map(s => s.trim()).filter(Boolean),
 ])];
 // Supabase stops a function at its wall-clock limit (150 s on the free plan); stop trying models before that.
 const BUDGET_MS = Number(Deno.env.get('EXTRACT_BUDGET_MS') ?? 140_000);

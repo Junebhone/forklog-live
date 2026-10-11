@@ -3,11 +3,15 @@
 // The app saves the proposed version on confirm (lib/db.ts saveVersion). STUB_MODE=1 returns sample.json.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { RECAP_SYSTEM, recapUser } from '../_shared/prompts.ts';
-import { CookDiffSchema, parseModelJson } from '../_shared/guards.ts';
+import { CookDiffSchema, parseModelJson, type CookDiff } from '../_shared/guards.ts';
 import { geminiGenerate, STUB_MODE } from '../_shared/gemini.ts';
 import sample from './sample.json' with { type: 'json' };
 
 const MODEL = Deno.env.get('GEMINI_COACH_MODEL') ?? 'gemini-3.8-flash';
+// The recap rewrites the whole recipe, so one slow or garbled answer is common. Each attempt gets its own
+// time slice and a different model on the second try; the total stays under the phone's 60 s request limit.
+const ATTEMPTS = [MODEL, ...(Deno.env.get('GEMINI_RECAP_FALLBACKS') ?? 'gemini-3.5-flash-lite,gemini-3.1-flash-lite').split(',').map(m => m.trim()).filter(m => m && m !== MODEL)].slice(0, 3);
+const ATTEMPT_MS = [26_000, 15_000, 13_000]; // lite models answer in well under 15 s
 const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' };
 const json = (b: unknown) => Response.json(b, { headers: cors });
@@ -54,24 +58,43 @@ Deno.serve(async req => {
     const { data: history } = await sb.from('versions').select('number, rating, notes, diff_json').eq('recipe_id', cook.recipe_id).not('rating', 'is', null).order('number');
     const { data: latest } = await sb.from('versions').select('number').eq('recipe_id', cook.recipe_id).order('number', { ascending: false }).limit(1).maybeSingle();
 
-    const text = await geminiGenerate({
-      model: MODEL,
-      system: RECAP_SYSTEM,
-      parts: [{ text: recapUser({
-        recipe: ver.recipe_json,
-        timeline: compactTimeline((events ?? []) as EventRow[]),
-        rating,
-        notes,
-        history: history ?? [],
-        nextVersion: (latest?.number ?? ver.number) + 1,
-      }) }],
-      maxTokens: 6000,
-      timeoutMs: 45_000,
+    const prompt = recapUser({
+      recipe: ver.recipe_json,
+      timeline: compactTimeline((events ?? []) as EventRow[]),
+      rating,
+      notes,
+      history: history ?? [],
+      nextVersion: (latest?.number ?? ver.number) + 1,
     });
-    const parsed = parseModelJson(CookDiffSchema, text);
-    if (!parsed.ok) return json({ ok: false, error: parsed.error, raw: text.slice(0, 500) });
+    // Malformed JSON (a missing comma deep in proposed_version) or a slow model moves on to the next attempt.
+    // Raw output of a bad answer is logged for prompt tuning.
+    let parsed: { ok: true; data: CookDiff } | { ok: false; error: string } = { ok: false, error: 'not run' };
+    let lastError = '';
+    let used = MODEL;
+    for (let i = 0; i < ATTEMPTS.length && !parsed.ok; i++) {
+      used = ATTEMPTS[i];
+      try {
+        const text = await geminiGenerate({
+          model: used,
+          system: RECAP_SYSTEM,
+          parts: [{ text: lastError.startsWith('bad JSON') ? `${prompt}\n\nA previous answer was not valid JSON. Return one complete, valid JSON object.` : prompt }],
+          maxTokens: 8000,
+          timeoutMs: ATTEMPT_MS[i],
+          retries: 0,
+        });
+        parsed = parseModelJson(CookDiffSchema, text);
+        if (!parsed.ok) {
+          lastError = `bad JSON: ${parsed.error}`;
+          console.warn(`recap ${used} ${lastError} | raw: ${text.slice(0, 300)} ... ${text.slice(-200)}`);
+        }
+      } catch (e) {
+        lastError = (e as Error).message;
+        console.warn(`recap ${used} failed after ${Date.now() - t0}ms: ${lastError}`);
+      }
+    }
+    if (!parsed.ok) return json({ ok: false, error: `Couldn't write the recap this time. Tap Generate to try again. (${lastError.slice(0, 160)})` });
 
-    console.log(`recap ${MODEL} ${Date.now() - t0}ms ${(events ?? []).length} events`);
+    console.log(`recap ${used} ${Date.now() - t0}ms ${(events ?? []).length} events`);
     return json({ ok: true, ...parsed.data });
   } catch (e) {
     return json({ ok: false, error: (e as Error).message });
