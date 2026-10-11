@@ -158,6 +158,7 @@ Return ONE JSON object only:
 
 Rules:
 - Only include a diff item if confidence ≥ 0.6. Time changes under 15% are noise; drop them.
+- "field" is a short human label the cook will read aloud ("soy sauce", "garlic frying time"), never a JSON key. Put units in from/to ("2 tbsp", "90 s").
 - Keep the cook's notes verbatim in proposed_version.notes.
 - If rating history shows a pattern (e.g. higher ratings with less sugar), state it plainly in suggestion. Otherwise null.
 - Output JSON only.`;

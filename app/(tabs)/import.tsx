@@ -1,10 +1,12 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { Body, Button, Card, Chip, ErrorBox, Muted, Screen, Title } from '@/components/ui';
 import { colors, font, radius, space } from '@/constants/theme';
 import { createRecipe, deleteRecipe, uploadVideo } from '@/lib/db';
+import { useDemoMode } from '@/lib/demo';
+import { DEMO_CLIP } from '@/lib/demoData';
 import { CONF, RecipeSchema, VIDEO_LIMITS, type Recipe } from '@/lib/guards';
 import { uploadRefFrames } from '@/lib/refFrames';
 import { invokeFn, supabaseConfigured } from '@/lib/supabase';
@@ -14,6 +16,9 @@ type Phase = 'idle' | 'uploading' | 'extracting' | 'review';
 type Result = { recipeId: string; versionId: string; recipe: Recipe };
 
 export default function ImportScreen() {
+  const demo = useDemoMode();
+  const { autorun } = useLocalSearchParams<{ autorun?: string }>();
+  const autoran = useRef(false);
   const [picked, setPicked] = useState<Picked | null>(null);
   const [caption, setCaption] = useState('');
   const [phase, setPhase] = useState<Phase>('idle');
@@ -34,9 +39,10 @@ export default function ImportScreen() {
     setPicked({ uri: a.uri, mimeType, durationSec, bytes: a.fileSize ?? null, name: a.fileName ?? 'video' });
   }
 
-  async function extract() {
-    if (!picked) return;
-    if (!supabaseConfigured) { setError('Supabase is not configured. Add EXPO_PUBLIC_SUPABASE_URL and ANON_KEY to .env.'); return; }
+  async function extract(clip: Picked | null = picked) {
+    if (!clip) return;
+    const picked = clip;
+    if (!supabaseConfigured && !demo) { setError('Supabase is not configured. Add EXPO_PUBLIC_SUPABASE_URL and ANON_KEY to .env, or start the demo from the Library tab.'); return; }
     setError(null);
     let recipeId: string | null = null;
     try {
@@ -59,6 +65,15 @@ export default function ImportScreen() {
       if (recipeId) deleteRecipe(recipeId).catch(() => {});
     }
   }
+
+  // Demo-only: /import?autorun=1 runs the demo clip through the whole flow (used for scripted walkthroughs).
+  useEffect(() => {
+    if (!demo || autorun !== '1' || autoran.current) return;
+    autoran.current = true;
+    setPicked(DEMO_CLIP);
+    void extract(DEMO_CLIP);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demo, autorun]);
 
   function reset() {
     setPicked(null); setCaption(''); setResult(null); setFrames(null); setError(null); setPhase('idle');
@@ -113,7 +128,10 @@ export default function ImportScreen() {
   return (
     <Screen>
       <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
-        <Title>Import a video</Title>
+        <View style={s.titleRow}>
+          <Title>Import a video</Title>
+          {demo && <Chip label="DEMO" tone="active" />}
+        </View>
         <Muted>Pick a saved cooking clip (under {VIDEO_LIMITS.maxSeconds / 60} min). ForkLog watches and listens, then writes the recipe.</Muted>
         {error && <ErrorBox message={error} />}
 
@@ -129,7 +147,10 @@ export default function ImportScreen() {
               {!busy && <Button title="Choose a different video" variant="ghost" onPress={pick} />}
             </>
           ) : (
-            <Button title="Choose video" size="lg" onPress={pick} />
+            <>
+              {demo && <Button title="Use the demo clip" size="lg" onPress={() => { setError(null); setPicked(DEMO_CLIP); }} />}
+              <Button title="Choose video" size="lg" variant={demo ? 'ghost' : 'primary'} onPress={pick} />
+            </>
           )}
         </Card>
 
@@ -148,10 +169,10 @@ export default function ImportScreen() {
           <Card style={s.progress}>
             <ActivityIndicator color={colors.accent} />
             <Body bold>{phase === 'uploading' ? 'Uploading video…' : 'Watching the video and writing the recipe…'}</Body>
-            <Muted size={14}>{phase === 'uploading' ? 'Sending to your Supabase bucket.' : 'This takes about a minute for a 60 s clip.'}</Muted>
+            <Muted size={14}>{phase === 'uploading' ? (demo ? 'Demo: pretending to upload.' : 'Sending to your Supabase bucket.') : demo ? 'Demo: returning the sample recipe.' : 'This takes about a minute for a 60 s clip.'}</Muted>
           </Card>
         ) : (
-          <Button title="Extract recipe" size="lg" disabled={!picked} onPress={extract} />
+          <Button title="Extract recipe" size="lg" disabled={!picked} onPress={() => void extract()} />
         )}
       </ScrollView>
     </Screen>
@@ -160,6 +181,7 @@ export default function ImportScreen() {
 
 const s = StyleSheet.create({
   scroll: { gap: space.md, paddingVertical: space.md, paddingBottom: 120 },
+  titleRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: space.sm },
   section: { color: colors.text, fontSize: font.big, fontWeight: '700', marginTop: space.sm },
   ingRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: space.sm },

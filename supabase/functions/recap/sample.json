@@ -12,9 +12,9 @@
     {
       "type": "changed_time",
       "step_n": 3,
-      "field": "duration_sec",
-      "from": "60",
-      "to": "90",
+      "field": "garlic frying time",
+      "from": "60 s",
+      "to": "90 s",
       "confidence": 0.7
     }
   ],

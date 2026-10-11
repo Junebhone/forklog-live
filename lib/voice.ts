@@ -1,15 +1,21 @@
 // Voice output: TTS via Edge Function, cached per line on disk, single-speaker queue with interrupt rules.
 // expo-audio (SDK 57). An alert interrupts a step read; a step read never interrupts an alert.
+// Fallback: if the tts function is unavailable (or demo mode is on) the line is spoken with the
+// device voice (expo-speech) so the coach is never silent.
 import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
 import { File, Paths } from 'expo-file-system';
+import * as Speech from 'expo-speech';
 import { supabase } from './supabase';
 import { AlertGate } from './guards';
 import { base64ToBytes } from './image';
+import { isDemoMode } from './demo';
 
 export type Priority = 'step' | 'alert' | 'stop';
 const ORDER: Record<Priority, number> = { step: 0, alert: 1, stop: 2 };
 
-type Current = { player: AudioPlayer; prio: Priority; sub: { remove(): void } };
+type Current =
+  | { kind: 'file'; prio: Priority; player: AudioPlayer; sub: { remove(): void } }
+  | { kind: 'speech'; prio: Priority };
 
 class Speaker {
   private current: Current | null = null;
@@ -25,6 +31,7 @@ class Speaker {
 
   /** Pre-generate audio for lines we know we will say (step intros). Failures are ignored. */
   async prefetch(lines: string[]) {
+    if (isDemoMode()) return;
     await Promise.all(lines.map(l => this.toFile(l).catch(() => null)));
   }
 
@@ -50,7 +57,10 @@ class Speaker {
     const cur = this.current;
     if (!cur) return;
     this.current = null;
-    try { cur.sub.remove(); cur.player.pause(); cur.player.remove(); } catch { /* already released */ }
+    try {
+      if (cur.kind === 'file') { cur.sub.remove(); cur.player.pause(); cur.player.remove(); }
+      else await Speech.stop();
+    } catch { /* already released */ }
     this.onLine?.(null);
   }
 
@@ -60,27 +70,47 @@ class Speaker {
   }
 
   private async play(text: string, prio: Priority) {
-    let uri: string;
-    try {
-      uri = await this.toFile(text);
-    } catch {
-      // TTS unavailable: still surface the line as a caption, then move on.
-      this.onLine?.(text);
-      this.next();
-      return;
+    if (!isDemoMode()) {
+      try {
+        const uri = await this.toFile(text);
+        this.playFile(uri, text, prio);
+        return;
+      } catch { /* fall through to device speech */ }
     }
+    this.playSpeech(text, prio);
+  }
+
+  private playFile(uri: string, text: string, prio: Priority) {
     const player = createAudioPlayer({ uri });
+    const cur: Current = { kind: 'file', prio, player, sub: { remove: () => {} } };
     const sub = player.addListener('playbackStatusUpdate', st => {
       if (!st.didJustFinish) return;
-      if (this.current?.player !== player) return;
-      this.current = null;
+      if (this.current !== cur) return;
       try { sub.remove(); player.remove(); } catch { /* ignore */ }
-      this.onLine?.(null);
-      this.next();
+      this.finish(cur);
     });
-    this.current = { player, prio, sub };
+    cur.sub = sub;
+    this.current = cur;
     this.onLine?.(text);
     player.play();
+  }
+
+  private playSpeech(text: string, prio: Priority) {
+    const cur: Current = { kind: 'speech', prio };
+    this.current = cur;
+    this.onLine?.(text);
+    Speech.speak(text, {
+      rate: 1.02,
+      onDone: () => this.finish(cur),
+      onError: () => this.finish(cur),
+    });
+  }
+
+  private finish(cur: Current) {
+    if (this.current !== cur) return;
+    this.current = null;
+    this.onLine?.(null);
+    this.next();
   }
 
   private next() {

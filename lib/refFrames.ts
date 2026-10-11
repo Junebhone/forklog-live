@@ -3,6 +3,7 @@
 import * as VideoThumbnails from 'expo-video-thumbnails';
 import { supabase } from './supabase';
 import { base64ToArrayBuffer, deleteQuietly, resizeJpeg } from './image';
+import { isDemoMode } from './demo';
 import type { Recipe } from './guards';
 
 export async function uploadRefFrames(
@@ -12,8 +13,15 @@ export async function uploadRefFrames(
   recipe: Recipe,
   onProgress?: (done: number, total: number) => void,
 ) {
-  let done = 0;
   const total = recipe.steps.length;
+  if (isDemoMode()) {
+    for (let i = 1; i <= total; i++) {
+      await new Promise(r => setTimeout(r, 350));
+      onProgress?.(i, total);
+    }
+    return;
+  }
+  let done = 0;
   await Promise.all(recipe.steps.map(async step => {
     let thumbUri: string | undefined;
     let smallUri: string | undefined;

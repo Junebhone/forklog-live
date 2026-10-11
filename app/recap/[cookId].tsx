@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Body, Button, Card, Centered, Chip, ErrorBox, Muted, Screen, Title } from '@/components/ui';
@@ -7,6 +7,7 @@ import { countCookEvents, getCook, getVersion, saveVersion, type CookRow, type D
 import { CookDiffSchema, type CookDiff } from '@/lib/guards';
 import { invokeFn } from '@/lib/supabase';
 import { speaker } from '@/lib/voice';
+import { useDemoMode } from '@/lib/demo';
 
 type Phase = 'rate' | 'generating' | 'review' | 'saving';
 
@@ -18,7 +19,9 @@ const DIFF_LABEL: Record<DiffItem['type'], string> = {
 };
 
 export default function RecapScreen() {
-  const { cookId } = useLocalSearchParams<{ cookId: string }>();
+  const { cookId, autorun } = useLocalSearchParams<{ cookId: string; autorun?: string }>();
+  const demo = useDemoMode();
+  const autoran = useRef(false);
   const [cook, setCook] = useState<CookRow | null>(null);
   const [base, setBase] = useState<VersionRow | null>(null);
   const [events, setEvents] = useState<number | null>(null);
@@ -44,34 +47,49 @@ export default function RecapScreen() {
     return () => { cancelled = true; void speaker.stopAll(); };
   }, [cookId]);
 
-  async function generate() {
+  async function generate(ratingOverride: number | null = rating): Promise<CookDiff | null> {
     setError(null);
     setPhase('generating');
     try {
-      const data = await invokeFn<{ ok: boolean } & Record<string, unknown>>('recap', { cook_id: cookId, rating, notes: notes.trim() });
+      const data = await invokeFn<{ ok: boolean } & Record<string, unknown>>('recap', { cook_id: cookId, rating: ratingOverride, notes: notes.trim() });
       const parsed = CookDiffSchema.safeParse(data);
       if (!parsed.success) throw new Error(`Recap failed validation: ${parsed.error.issues[0]?.message ?? 'unknown'}`);
       setResult(parsed.data);
       setPhase('review');
       void speaker.say(parsed.data.spoken_recap, 'step', undefined, { clamp: false });
+      return parsed.data;
     } catch (e) {
       setError((e as Error).message);
       setPhase('rate');
+      return null;
     }
   }
 
-  async function save() {
-    if (!cook || !base || !result) return;
+  async function save(r: CookDiff | null = result, ratingValue: number | null = rating) {
+    if (!cook || !base || !r) return;
+    const result = r;
     setPhase('saving');
     try {
       await speaker.stopAll();
-      await saveVersion({ recipeId: cook.recipe_id, parentId: base.id, recipe: result.proposed_version, diff: result.diff, rating, notes: notes.trim(), cookId });
+      await saveVersion({ recipeId: cook.recipe_id, parentId: base.id, recipe: result.proposed_version, diff: result.diff, rating: ratingValue, notes: notes.trim(), cookId });
       router.replace(`/history/${cook.recipe_id}`);
     } catch (e) {
       setError((e as Error).message);
       setPhase('review');
     }
   }
+
+  // Demo-only: /recap/<id>?autorun=1 rates 8 and generates; autorun=save also saves v2 and opens Versions.
+  useEffect(() => {
+    if (!demo || !cook || !base || autoran.current || (autorun !== '1' && autorun !== 'save')) return;
+    autoran.current = true;
+    setRating(8);
+    void (async () => {
+      const r = await generate(8);
+      if (r && autorun === 'save') await save(r, 8);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demo, cook, base, autorun]);
 
   function skip() {
     void speaker.stopAll();
@@ -118,7 +136,7 @@ export default function RecapScreen() {
               onChangeText={setNotes}
               editable={phase === 'rate'}
             />
-            <Button title={phase === 'generating' ? 'Comparing with the video…' : 'Show me what I changed'} size="lg" loading={phase === 'generating'} disabled={!cook || !base} onPress={generate} />
+            <Button title={phase === 'generating' ? 'Comparing with the video…' : 'Show me what I changed'} size="lg" loading={phase === 'generating'} disabled={!cook || !base} onPress={() => void generate()} />
             <Button title="Skip" variant="ghost" disabled={phase === 'generating'} onPress={skip} />
           </>
         ) : result ? (
@@ -153,7 +171,7 @@ export default function RecapScreen() {
               </Card>
             )}
 
-            <Button title={`Save as v${nextVersion}`} size="lg" loading={phase === 'saving'} onPress={save} />
+            <Button title={`Save as v${nextVersion}`} size="lg" loading={phase === 'saving'} onPress={() => void save()} />
             <Button title="Don't save" variant="ghost" disabled={phase === 'saving'} onPress={skip} />
           </>
         ) : null}

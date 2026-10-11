@@ -5,6 +5,9 @@ import type { CameraView } from 'expo-camera';
 import { supabase } from './supabase';
 import { base64ToBytes, deleteQuietly, resizeJpeg } from './image';
 import { CoachEventSchema, filterCoachEvent, sceneChanged, FRAME_LIMITS, type CoachEvent, type Recipe } from './guards';
+import { isDemoMode } from './demo';
+import { DEMO_COACH_SCRIPT } from './demoData';
+import { demoDb } from './demoDb';
 
 type Listener = (ev: CoachEvent, stepN: number) => void;
 export type VisionStats = { sent: number; ok: number; skipped: number; lastLatencyMs: number | null; lastError: string | null };
@@ -17,6 +20,7 @@ export class VisionLoop {
   private detected = new Set<string>();
   private stepStartedAt = Date.now();
   private stats: VisionStats = { sent: 0, ok: 0, skipped: 0, lastLatencyMs: null, lastError: null };
+  private demoFired = new Set<string>();
   stepN = 1;
 
   constructor(
@@ -43,12 +47,40 @@ export class VisionLoop {
     this.stepStartedAt = Date.now();
     this.detected.clear();
     this.prevThumb = null; // force a send on the new step
+    this.demoFired.clear();
   }
 
   private emitStats() { this.onStats?.({ ...this.stats }); }
 
+  /** Demo mode: no camera, no network. Replays the scripted events for the current step on the same cadence. */
+  private tickDemo(now: number) {
+    const step = this.recipe.steps.find(s => s.n === this.stepN);
+    if (!step) return;
+    const elapsed = (now - this.stepStartedAt) / 1000;
+    let fired = false;
+    for (const item of DEMO_COACH_SCRIPT[this.stepN] ?? []) {
+      const key = `${this.stepN}:${item.atSec}`;
+      if (elapsed < item.atSec || this.demoFired.has(key)) continue;
+      this.demoFired.add(key);
+      fired = true;
+      this.stats.sent++;
+      this.stats.ok++;
+      this.stats.lastLatencyMs = 900 + Math.round(Math.random() * 500);
+      const ev = filterCoachEvent(item.event, step.text);
+      if (ev.ingredient_added) this.detected.add(ev.ingredient_added);
+      demoDb.recordEvent(this.cookId, this.stepN, ev);
+      this.onEvent(ev, this.stepN);
+    }
+    if (now - this.lastSent >= FRAME_LIMITS.minIntervalMs) {
+      this.lastSent = now;
+      if (!fired) this.stats.skipped++;
+    }
+    this.emitStats();
+  }
+
   private async tick() {
     const now = Date.now();
+    if (isDemoMode()) { this.tickDemo(now); return; }
     if (this.inFlight >= FRAME_LIMITS.maxInFlight) return;
     if (now - this.lastSent < FRAME_LIMITS.minIntervalMs) return;
     const cam = this.camera.current;

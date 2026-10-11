@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { File } from 'expo-file-system';
 import { supabase, DEMO_USER_ID } from './supabase';
 import { RecipeSchema, DiffItemSchema, type Recipe } from './guards';
+import { isDemoMode } from './demo';
+import { demoDb } from './demoDb';
 
 export type DiffItem = z.infer<typeof DiffItemSchema>;
 
@@ -49,6 +51,7 @@ function fail(ctx: string, error: { message: string } | null): never {
 // ----- recipes ---------------------------------------------------------------
 
 export async function listLibrary(): Promise<LibraryItem[]> {
+  if (isDemoMode()) return demoDb.listLibrary();
   const { data, error } = await supabase
     .from('recipes')
     .select('id,title,source_summary,created_at,versions(number,rating)')
@@ -71,12 +74,14 @@ export async function listLibrary(): Promise<LibraryItem[]> {
 }
 
 export async function getRecipeTitle(recipeId: string): Promise<string> {
+  if (isDemoMode()) return demoDb.getRecipeTitle(recipeId);
   const { data, error } = await supabase.from('recipes').select('title').eq('id', recipeId).single();
   if (error) fail('getRecipeTitle', error);
   return (data as { title: string }).title;
 }
 
 export async function createRecipe(): Promise<string> {
+  if (isDemoMode()) return demoDb.createRecipe();
   const { data, error } = await supabase
     .from('recipes')
     .insert({ user_id: DEMO_USER_ID, title: 'Importing…' })
@@ -87,17 +92,20 @@ export async function createRecipe(): Promise<string> {
 }
 
 export async function setRecipeVideoPath(recipeId: string, path: string) {
+  if (isDemoMode()) return demoDb.setRecipeVideoPath();
   const { error } = await supabase.from('recipes').update({ source_video_path: path }).eq('id', recipeId);
   if (error) fail('setRecipeVideoPath', error);
 }
 
 export async function deleteRecipe(recipeId: string) {
+  if (isDemoMode()) return demoDb.deleteRecipe(recipeId);
   const { error } = await supabase.from('recipes').delete().eq('id', recipeId);
   if (error) fail('deleteRecipe', error);
 }
 
 /** Upload the picked video to bucket "videos". Returns the storage path. */
 export async function uploadVideo(localUri: string, recipeId: string, mimeType: string): Promise<string> {
+  if (isDemoMode()) return demoDb.uploadVideo(localUri, recipeId);
   const ext = mimeType.includes('quicktime') || localUri.toLowerCase().endsWith('.mov') ? 'mov' : 'mp4';
   const path = `${recipeId}/source.${ext}`;
   const bytes = await new File(localUri).arrayBuffer();
@@ -120,12 +128,14 @@ function parseVersions(rows: unknown[], ctx: string): VersionRow[] {
 }
 
 export async function getVersions(recipeId: string): Promise<VersionRow[]> {
+  if (isDemoMode()) return demoDb.getVersions(recipeId);
   const { data, error } = await supabase.from('versions').select('*').eq('recipe_id', recipeId).order('number', { ascending: false });
   if (error) fail('getVersions', error);
   return parseVersions(data ?? [], 'getVersions');
 }
 
 export async function getVersion(versionId: string): Promise<VersionRow> {
+  if (isDemoMode()) return demoDb.getVersion(versionId);
   const { data, error } = await supabase.from('versions').select('*').eq('id', versionId).single();
   if (error) fail('getVersion', error);
   const p = VersionRowSchema.safeParse(data);
@@ -134,6 +144,7 @@ export async function getVersion(versionId: string): Promise<VersionRow> {
 }
 
 export async function getLatestVersion(recipeId: string): Promise<VersionRow> {
+  if (isDemoMode()) return demoDb.getLatestVersion(recipeId);
   const { data, error } = await supabase.from('versions').select('*').eq('recipe_id', recipeId).order('number', { ascending: false }).limit(1);
   if (error) fail('getLatestVersion', error);
   const rows = parseVersions(data ?? [], 'getLatestVersion');
@@ -150,6 +161,7 @@ export async function saveVersion(opts: {
   notes: string;
   cookId: string;
 }): Promise<VersionRow> {
+  if (isDemoMode()) return demoDb.saveVersion(opts);
   const existing = await getVersions(opts.recipeId);
   const number = (existing[0]?.number ?? 0) + 1;
   const { data, error } = await supabase
@@ -173,6 +185,7 @@ export async function saveVersion(opts: {
 }
 
 export async function setBestVersion(recipeId: string, versionId: string) {
+  if (isDemoMode()) return demoDb.setBestVersion(recipeId, versionId);
   await supabase.from('versions').update({ is_best: false }).eq('recipe_id', recipeId);
   const { error } = await supabase.from('versions').update({ is_best: true }).eq('id', versionId);
   if (error) fail('setBestVersion', error);
@@ -181,17 +194,20 @@ export async function setBestVersion(recipeId: string, versionId: string) {
 // ----- cooks -----------------------------------------------------------------
 
 export async function startCook(recipeId: string, versionId: string): Promise<string> {
+  if (isDemoMode()) return demoDb.startCook(recipeId, versionId);
   const { data, error } = await supabase.from('cooks').insert({ recipe_id: recipeId, base_version_id: versionId }).select('id').single();
   if (error) fail('startCook', error);
   return (data as { id: string }).id;
 }
 
 export async function endCook(cookId: string) {
+  if (isDemoMode()) return demoDb.endCook(cookId);
   const { error } = await supabase.from('cooks').update({ ended_at: new Date().toISOString() }).eq('id', cookId);
   if (error) fail('endCook', error);
 }
 
 export async function getCook(cookId: string): Promise<CookRow> {
+  if (isDemoMode()) return demoDb.getCook(cookId);
   const { data, error } = await supabase.from('cooks').select('*').eq('id', cookId).single();
   if (error) fail('getCook', error);
   const p = CookRowSchema.safeParse(data);
@@ -200,6 +216,7 @@ export async function getCook(cookId: string): Promise<CookRow> {
 }
 
 export async function countCookEvents(cookId: string): Promise<number> {
+  if (isDemoMode()) return demoDb.countCookEvents(cookId);
   const { count, error } = await supabase.from('cook_events').select('id', { count: 'exact', head: true }).eq('cook_id', cookId);
   if (error) fail('countCookEvents', error);
   return count ?? 0;

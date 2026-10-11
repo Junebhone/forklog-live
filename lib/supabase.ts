@@ -1,4 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
+import { isDemoMode } from './demo';
+import { demoInvoke } from './demoDb';
 
 const url = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const anon = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
@@ -16,6 +18,7 @@ export const DEMO_USER_ID = '00000000-0000-0000-0000-000000000001';
 
 /** Unwrap a Supabase Edge Function response: throws a readable error on transport or `ok: false`. */
 export async function invokeFn<T extends { ok: boolean }>(name: string, body: Record<string, unknown>): Promise<T> {
+  if (isDemoMode()) return demoInvoke<T>(name, body);
   const { data, error } = await supabase.functions.invoke<T & { error?: string }>(name, { body });
   if (error) throw new Error(`${name}: ${error.message}`);
   if (!data) throw new Error(`${name}: empty response`);

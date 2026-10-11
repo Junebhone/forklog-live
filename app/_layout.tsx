@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
+import { DarkTheme, Stack, ThemeProvider, useGlobalSearchParams, usePathname } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { colors } from '@/constants/theme';
 import { initAudio } from '@/lib/voice';
@@ -9,6 +9,14 @@ const theme = {
   colors: { ...DarkTheme.colors, background: colors.bg, card: colors.bg, text: colors.text, primary: colors.accent, border: colors.border },
 };
 
+function RouteLogger() {
+  const pathname = usePathname();
+  const params = useGlobalSearchParams();
+  const json = JSON.stringify(params);
+  useEffect(() => { if (__DEV__) console.log(`[route] ${pathname} ${json}`); }, [pathname, json]);
+  return null;
+}
+
 export default function RootLayout() {
   useEffect(() => {
     initAudio().catch(e => console.warn('audio mode', e));
@@ -17,6 +25,7 @@ export default function RootLayout() {
   return (
     <ThemeProvider value={theme}>
       <StatusBar style="light" />
+      <RouteLogger />
       <Stack
         screenOptions={{
           headerStyle: { backgroundColor: colors.bg },
