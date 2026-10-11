@@ -1,10 +1,13 @@
 // Live coaching loop: capture → downscale → scene check → coach-frame Edge Function → filtered event.
+// Cadence rules (CLAUDE.md): send only when the scene changed AND ≥2 s since the last send; max 1 in flight.
+import type { RefObject } from 'react';
 import type { CameraView } from 'expo-camera';
-import * as ImageManipulator from 'expo-image-manipulator';
 import { supabase } from './supabase';
+import { base64ToBytes, deleteQuietly, resizeJpeg } from './image';
 import { CoachEventSchema, filterCoachEvent, sceneChanged, FRAME_LIMITS, type CoachEvent, type Recipe } from './guards';
 
 type Listener = (ev: CoachEvent, stepN: number) => void;
+export type VisionStats = { sent: number; ok: number; skipped: number; lastLatencyMs: number | null; lastError: string | null };
 
 export class VisionLoop {
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -13,20 +16,36 @@ export class VisionLoop {
   private prevThumb: Uint8Array | null = null;
   private detected = new Set<string>();
   private stepStartedAt = Date.now();
+  private stats: VisionStats = { sent: 0, ok: 0, skipped: 0, lastLatencyMs: null, lastError: null };
   stepN = 1;
 
   constructor(
-    private camera: React.RefObject<CameraView>,
+    private camera: RefObject<CameraView | null>,
     private recipe: Recipe,
     private recipeId: string,
     private cookId: string,
     private onEvent: Listener,
+    private onStats?: (s: VisionStats) => void,
   ) {}
 
-  start() { this.timer = setInterval(() => void this.tick(), 700); }
-  stop() { if (this.timer) clearInterval(this.timer); this.timer = null; }
+  start() {
+    if (this.timer) return;
+    this.timer = setInterval(() => void this.tick(), 700);
+  }
 
-  setStep(n: number) { this.stepN = n; this.stepStartedAt = Date.now(); this.detected.clear(); }
+  stop() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+  }
+
+  setStep(n: number) {
+    this.stepN = n;
+    this.stepStartedAt = Date.now();
+    this.detected.clear();
+    this.prevThumb = null; // force a send on the new step
+  }
+
+  private emitStats() { this.onStats?.({ ...this.stats }); }
 
   private async tick() {
     const now = Date.now();
@@ -36,25 +55,30 @@ export class VisionLoop {
     if (!cam) return;
 
     this.inFlight++;
+    let shotUri: string | undefined;
+    let smallUri: string | undefined;
+    let thumbUri: string | undefined;
     try {
-      const shot = await cam.takePictureAsync({ quality: FRAME_LIMITS.jpegQuality, skipProcessing: true, base64: false });
+      const shot = await cam.takePictureAsync({ quality: FRAME_LIMITS.jpegQuality, skipProcessing: true, shutterSound: false });
       if (!shot?.uri) return;
+      shotUri = shot.uri;
 
-      const small = await ImageManipulator.manipulateAsync(
-        shot.uri,
-        [{ resize: { width: FRAME_LIMITS.maxWidth } }],
-        { compress: FRAME_LIMITS.jpegQuality, format: ImageManipulator.SaveFormat.JPEG, base64: true },
-      );
-      // Thumbnail for scene change: 16px wide, read as rough luma via base64 length proxy is too crude;
-      // for the hackathon we use a 16px resize and compare base64 bytes. Good enough to skip static frames.
-      const thumb = await ImageManipulator.manipulateAsync(shot.uri, [{ resize: { width: 16 } }], { compress: 0.3, base64: true, format: ImageManipulator.SaveFormat.JPEG });
-      const thumbBytes = Uint8Array.from(atob(thumb.base64 ?? ''), c => c.charCodeAt(0));
-      if (!sceneChanged(this.prevThumb, thumbBytes)) return;
+      // Tiny thumbnail as a cheap "did anything change" check (compressed bytes, not true luma — good enough to skip a static counter).
+      const thumb = await resizeJpeg(shot.uri, 16, 0.3);
+      thumbUri = thumb.uri;
+      const thumbBytes = base64ToBytes(thumb.base64);
+      if (!sceneChanged(this.prevThumb, thumbBytes)) { this.stats.skipped++; this.emitStats(); return; }
       this.prevThumb = thumbBytes;
-      this.lastSent = now;
 
-      const step = this.recipe.steps.find(s => s.n === this.stepN)!;
-      const { data, error } = await supabase.functions.invoke('coach-frame', {
+      const small = await resizeJpeg(shot.uri, FRAME_LIMITS.maxWidth, FRAME_LIMITS.jpegQuality);
+      smallUri = small.uri;
+      this.lastSent = now;
+      this.stats.sent++;
+
+      const step = this.recipe.steps.find(s => s.n === this.stepN);
+      if (!step) return;
+      const t0 = Date.now();
+      const { data, error } = await supabase.functions.invoke<{ ok: boolean; event?: unknown; error?: string }>('coach-frame', {
         body: {
           recipe_id: this.recipeId,
           cook_id: this.cookId,
@@ -64,17 +88,24 @@ export class VisionLoop {
           elapsed_sec: Math.round((now - this.stepStartedAt) / 1000),
         },
       });
-      if (error || !data?.ok) return;
+      this.stats.lastLatencyMs = Date.now() - t0;
+      if (error || !data?.ok) { this.stats.lastError = error?.message ?? data?.error ?? 'coach-frame failed'; return; }
 
       const parsed = CoachEventSchema.safeParse(data.event);
-      if (!parsed.success) return;
+      if (!parsed.success) { this.stats.lastError = 'bad event json'; return; }
+      this.stats.ok++;
+      this.stats.lastError = null;
       const ev = filterCoachEvent(parsed.data, step.text);
       if (ev.ingredient_added) this.detected.add(ev.ingredient_added);
       this.onEvent(ev, this.stepN);
-    } catch {
-      // swallow; next tick retries
+    } catch (e) {
+      this.stats.lastError = (e as Error).message;
     } finally {
       this.inFlight--;
+      deleteQuietly(shotUri);
+      deleteQuietly(smallUri);
+      deleteQuietly(thumbUri);
+      this.emitStats();
     }
   }
 }
