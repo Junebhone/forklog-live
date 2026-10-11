@@ -23,6 +23,7 @@ export default function ImportScreen() {
   const [caption, setCaption] = useState('');
   const [phase, setPhase] = useState<Phase>('idle');
   const [error, setError] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0); // seconds in the extracting phase, shown so a slow Gemini call does not look hung
   const [result, setResult] = useState<Result | null>(null);
   const [frames, setFrames] = useState<{ done: number; total: number } | null>(null);
 
@@ -65,6 +66,12 @@ export default function ImportScreen() {
       if (recipeId) deleteRecipe(recipeId).catch(() => {});
     }
   }
+
+  useEffect(() => {
+    if (phase !== 'extracting') { setElapsed(0); return; }
+    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(t);
+  }, [phase]);
 
   // Demo-only: /import?autorun=1 runs the demo clip through the whole flow (used for scripted walkthroughs).
   useEffect(() => {
@@ -168,8 +175,8 @@ export default function ImportScreen() {
         {busy ? (
           <Card style={s.progress}>
             <ActivityIndicator color={colors.accent} />
-            <Body bold>{phase === 'uploading' ? 'Uploading video…' : 'Watching the video and writing the recipe…'}</Body>
-            <Muted size={14}>{phase === 'uploading' ? (demo ? 'Demo: pretending to upload.' : 'Sending to your Supabase bucket.') : demo ? 'Demo: returning the sample recipe.' : 'This takes about a minute for a 60 s clip.'}</Muted>
+            <Body bold>{phase === 'uploading' ? 'Uploading video…' : `Watching the video and writing the recipe… ${elapsed}s`}</Body>
+            <Muted size={14}>{phase === 'uploading' ? (demo ? 'Demo: pretending to upload.' : 'Sending to your Supabase bucket.') : demo ? 'Demo: returning the sample recipe.' : 'Usually 30–90 s for a 60 s clip. Gemini can be slower at peak times; this screen waits up to 2½ minutes.'}</Muted>
           </Card>
         ) : (
           <Button title="Extract recipe" size="lg" disabled={!picked} onPress={() => void extract()} />

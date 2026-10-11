@@ -10,9 +10,18 @@ export type Part =
 const RETRY_STATUS = new Set([429, 500, 503]);
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-/** One generateContent call with JSON output. Retries 429/5xx twice with backoff inside the overall timeout. */
-export async function geminiGenerate(o: { model: string; system: string; parts: Part[]; maxTokens?: number; timeoutMs?: number }): Promise<string> {
+/** Free-tier keys get this on models they have no quota for ("check your plan and billing"). Waiting does not help. */
+export const HARD_QUOTA = /billing|plan/i;
+/** Errors worth trying another model for: rate limits, overload, timeouts. */
+export const TRANSIENT = /429|quota|RESOURCE_EXHAUSTED|503|overloaded|UNAVAILABLE|timeout/i;
+
+/**
+ * One generateContent call with JSON output. Retries 429/5xx (`retries` times, default 2) with backoff
+ * inside the overall timeout. A hard quota error is thrown at once. Errors carry the HTTP status: "gemini 503: ...".
+ */
+export async function geminiGenerate(o: { model: string; system: string; parts: Part[]; maxTokens?: number; timeoutMs?: number; retries?: number }): Promise<string> {
   const deadline = Date.now() + (o.timeoutMs ?? 50_000);
+  const retries = o.retries ?? 2;
   for (let attempt = 0; ; attempt++) {
     const remaining = deadline - Date.now();
     if (remaining <= 0) throw new Error('gemini timeout');
@@ -30,8 +39,9 @@ export async function geminiGenerate(o: { model: string; system: string; parts: 
       });
       const out = await r.json();
       if (!r.ok) {
-        const msg = out?.error?.message ?? `gemini ${r.status}`;
-        if (RETRY_STATUS.has(r.status) && attempt < 2) { console.warn(`gemini ${r.status}, retry ${attempt + 1}`); await sleep(1000 * 2 ** attempt); continue; }
+        const msg = `gemini ${r.status}: ${out?.error?.message ?? 'no message'}`;
+        const hardQuota = r.status === 429 && HARD_QUOTA.test(msg);
+        if (RETRY_STATUS.has(r.status) && !hardQuota && attempt < retries) { console.warn(`gemini ${r.status}, retry ${attempt + 1}`); await sleep(1000 * 2 ** attempt); continue; }
         throw new Error(msg);
       }
       // deno-lint-ignore no-explicit-any
