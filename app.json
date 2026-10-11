@@ -1,0 +1,66 @@
+{
+  "expo": {
+    "name": "ForkLog Live",
+    "slug": "forklog-live",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "forklog",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0b0b0f",
+    "ios": {
+      "icon": "./assets/expo.icon",
+      "bundleIdentifier": "com.forklog.live",
+      "supportsTablet": false,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.forklog.live",
+      "adaptiveIcon": {
+        "backgroundColor": "#0b0b0f",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0b0b0f",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 76
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "ForkLog watches your pan so it can coach you while you cook.",
+          "microphonePermission": "ForkLog listens only while you hold the mic button to ask a question.",
+          "recordAudioAndroid": true
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "ForkLog reads the cooking video you pick to extract the recipe."
+        }
+      ],
+      [
+        "expo-audio",
+        {
+          "microphonePermission": "ForkLog listens only while you hold the mic button to ask a question."
+        }
+      ],
+      "expo-asset"
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}
