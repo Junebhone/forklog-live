@@ -102,9 +102,14 @@ export function coachFrameUser(opts: {
   elapsedSec: number;
   visualCue: string;
   hasReference?: boolean;
+  intentionalChanges?: string;
+  quantities?: string;
 }) {
   return `Current step: ${opts.stepText}
 Expected ingredients this step: ${opts.expectedIngredients.join(', ') || 'none'}
+Selected quantities: ${opts.quantities || '(use the recipe)'}
+Intentional changes: ${opts.intentionalChanges || 'none'}
+Intentional omissions and quantities override the source step and creator reference. Never request an omitted ingredient, report its absence as a deviation, or correct an intentional quantity back to the creator's amount. Judge remaining technique and safety; the source image is for context, not an exact target for an adapted recipe.
 Already detected: ${opts.alreadyDetected.join(', ') || 'none'}
 Creator's visual cue for done: ${opts.visualCue}
 Seconds elapsed in this step: ${opts.elapsedSec}
@@ -158,6 +163,7 @@ Return ONE JSON object only:
 
 Rules:
 - Only include a diff item if confidence ≥ 0.6. Time changes under 15% are noise; drop them.
+- Ingredients marked omitted are intentional, not missed detections. Keep their canonical entries and omitted flag for undo. Preserve source_qty/source_unit and manually selected quantities. Do not undo intentional choices or report them as mistakes. Preserve step numbers and ref_frame_sec. Camera-event time spans are approximate observation spans, not measured cooking durations.
 - "field" is a short human label the cook will read aloud ("soy sauce", "garlic frying time"), never a JSON key. Put units in from/to ("2 tbsp", "90 s").
 - Keep the cook's notes verbatim in proposed_version.notes.
 - If rating history shows a pattern (e.g. higher ratings with less sugar), state it plainly in suggestion. Otherwise null.

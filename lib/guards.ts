@@ -20,6 +20,9 @@ export const IngredientSchema = z.object({
   unit: z.string(),
   confidence: z.number().min(0).max(1),
   evidence: z.enum(['spoken', 'visual', 'text', 'inferred']),
+  omitted: z.boolean().optional(), // intentional choice; retain canonical name for undo/reference mapping
+  source_qty: z.string().optional(),
+  source_unit: z.string().optional(),
 });
 
 export const StepSchema = z.object({
