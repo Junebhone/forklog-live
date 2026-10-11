@@ -7,11 +7,12 @@ import { CookDiffSchema, parseModelJson, type CookDiff } from '../_shared/guards
 import { geminiGenerate, STUB_MODE } from '../_shared/gemini.ts';
 import sample from './sample.json' with { type: 'json' };
 
-const MODEL = Deno.env.get('GEMINI_COACH_MODEL') ?? 'gemini-3.8-flash';
-// The recap rewrites the whole recipe, so one slow or garbled answer is common. Each attempt gets its own
-// time slice and a different model on the second try; the total stays under the phone's 60 s request limit.
-const ATTEMPTS = [MODEL, ...(Deno.env.get('GEMINI_RECAP_FALLBACKS') ?? 'gemini-3.5-flash-lite,gemini-3.1-flash-lite').split(',').map(m => m.trim()).filter(m => m && m !== MODEL)].slice(0, 3);
-const ATTEMPT_MS = [26_000, 15_000, 13_000]; // lite models answer in well under 15 s
+// gemini-3.8-flash regularly needs 30 s+ to rewrite a whole recipe; flash-lite does it in about 4 s.
+// So lite goes first, Flash is the fallback. Each attempt has its own time slice; total stays under the
+// phone's 60 s request limit.
+const ATTEMPTS = (Deno.env.get('GEMINI_RECAP_MODELS') ?? 'gemini-3.5-flash-lite,gemini-3.8-flash,gemini-3.1-flash-lite').split(',').map(m => m.trim()).filter(Boolean).slice(0, 3);
+const ATTEMPT_MS = [18_000, 25_000, 12_000];
+const MODEL = ATTEMPTS[0];
 const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' };
 const json = (b: unknown) => Response.json(b, { headers: cors });
