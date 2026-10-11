@@ -74,8 +74,11 @@ class Speaker {
       try {
         const uri = await this.toFile(text);
         this.playFile(uri, text, prio);
+        if (__DEV__) console.log(`[voice] ElevenLabs: ${text}`);
         return;
-      } catch { /* fall through to device speech */ }
+      } catch (e) {
+        console.warn(`[voice] ElevenLabs failed, using device voice: ${(e as Error).message}`);
+      }
     }
     this.playSpeech(text, prio);
   }
@@ -122,7 +125,8 @@ class Speaker {
     const hit = this.cache.get(text);
     if (hit) return hit;
     const { data, error } = await supabase.functions.invoke<{ ok: boolean; audio_b64?: string }>('tts', { body: { text } });
-    if (error || !data?.ok || !data.audio_b64) throw new Error('tts failed');
+    if (error) throw new Error(`tts request: ${error.message}`);
+    if (!data?.ok || !data.audio_b64) throw new Error(`tts: ${(data as { error?: string } | null)?.error ?? 'no audio'}`);
     const file = new File(Paths.cache, `tts-${hash(text)}.mp3`);
     file.write(base64ToBytes(data.audio_b64));
     this.cache.set(text, file.uri);
