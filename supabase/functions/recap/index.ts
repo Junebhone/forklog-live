@@ -3,8 +3,7 @@
 // The app saves the proposed version on confirm (lib/db.ts saveVersion). STUB_MODE=1 returns sample.json.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { RECAP_SYSTEM, recapUser } from '../_shared/prompts.ts';
-import { CookDiffSchema, RecipeSchema, parseModelJson, type CookDiff } from '../_shared/guards.ts';
-import { ADAPTATION_CONTRACT, hasAdaptations, preserveIntentions, ingredientKey } from '../_shared/recipeOptions.ts';
+import { CookDiffSchema, parseModelJson, type CookDiff } from '../_shared/guards.ts';
 import { geminiGenerate, STUB_MODE } from '../_shared/gemini.ts';
 import sample from './sample.json' with { type: 'json' };
 
@@ -46,23 +45,16 @@ Deno.serve(async req => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   const t0 = Date.now();
   try {
-    const { capability_check, cook_id, rating = null, notes = '' } = await req.json();
-    if (capability_check === true) return json({ ok: true, adaptation_contract: ADAPTATION_CONTRACT, scripted: STUB_MODE });
+    const { cook_id, rating = null, notes = '' } = await req.json();
     if (!cook_id) return json({ ok: false, error: 'cook_id required' });
 
-    const { error: cookUpdateError } = await sb.from('cooks').update({ ended_at: new Date().toISOString(), rating, notes: notes || null }).eq('id', cook_id);
-    if (cookUpdateError) return json({ ok: false, error: 'Could not save cook details. Retry when connected.' });
+    await sb.from('cooks').update({ ended_at: new Date().toISOString(), rating, notes: notes || null }).eq('id', cook_id);
+    if (STUB_MODE) return json(sample);
 
     const { data: cook } = await sb.from('cooks').select('recipe_id, base_version_id').eq('id', cook_id).single();
     if (!cook) return json({ ok: false, error: 'cook not found' });
     const { data: ver } = await sb.from('versions').select('number, recipe_json').eq('id', cook.base_version_id).single();
     if (!ver) return json({ ok: false, error: 'version not found' });
-    const base = RecipeSchema.parse(ver.recipe_json);
-    if (STUB_MODE) return json(hasAdaptations(base) ? {
-      ok: true, diff: [], proposed_version: { ...base, notes },
-      spoken_recap: 'Your intentional changes are saved. Backend STUB_MODE cannot measure differences from an adapted cook.', suggestion: null,
-      scripted: true,
-    } : { ...sample, scripted: true });
     const { data: events } = await sb.from('cook_events').select('step_n, at, event').eq('cook_id', cook_id).order('at');
     const { data: history } = await sb.from('versions').select('number, rating, notes, diff_json').eq('recipe_id', cook.recipe_id).not('rating', 'is', null).order('number');
     const { data: latest } = await sb.from('versions').select('number').eq('recipe_id', cook.recipe_id).order('number', { ascending: false }).limit(1).maybeSingle();
@@ -104,15 +96,7 @@ Deno.serve(async req => {
     if (!parsed.ok) return json({ ok: false, error: `Couldn't write the recap this time. Tap Generate to try again. (${lastError.slice(0, 160)})` });
 
     console.log(`recap ${used} ${Date.now() - t0}ms ${(events ?? []).length} events`);
-    const result = parsed.data;
-    if (hasAdaptations(base)) {
-      result.proposed_version = preserveIntentions(base, result.proposed_version);
-      const intentional = base.ingredients.filter(i => i.omitted || i.source_qty !== undefined).map(i => ingredientKey(i.name));
-      result.diff = result.diff.filter(d => !intentional.some(name => ingredientKey(d.field).includes(name)));
-      result.spoken_recap = result.diff.length ? 'Intentional choices preserved. Review the estimated differences below before saving.' : 'Intentional choices preserved. No additional supported differences to save.';
-      result.suggestion = null; // do not leak source-based correction advice into the adapted recap
-    }
-    return json({ ok: true, ...result, scripted: false });
+    return json({ ok: true, ...parsed.data });
   } catch (e) {
     return json({ ok: false, error: (e as Error).message });
   }

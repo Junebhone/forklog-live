@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Body, Button, Card, Centered, Chip, ErrorBox, Muted, Screen, Title } from '@/components/ui';
 import { colors, font, radius, space } from '@/constants/theme';
-import { countCookEvents, getCook, getVersion, getVersions, saveVersion, type CookRow, type DiffItem, type VersionRow } from '@/lib/db';
+import { countCookEvents, getCook, getVersion, saveVersion, type CookRow, type DiffItem, type VersionRow } from '@/lib/db';
 import { CookDiffSchema, type CookDiff } from '@/lib/guards';
-import { invokeFn, requireAdaptationBackend } from '@/lib/supabase';
+import { invokeFn } from '@/lib/supabase';
 import { speaker } from '@/lib/voice';
 import { useDemoMode } from '@/lib/demo';
-import { adaptationSummary, hasAdaptations, preserveIntentions } from '@/lib/recipeOptions';
 
 type Phase = 'rate' | 'generating' | 'review' | 'saving';
 
@@ -31,28 +30,15 @@ export default function RecapScreen() {
   const [phase, setPhase] = useState<Phase>('rate');
   const [result, setResult] = useState<CookDiff | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const busy = useRef(false);
-  const savedRow = useRef<VersionRow | null>(null);
-  const [elapsed, setElapsed] = useState(0);
-  const [nextVersion, setNextVersion] = useState<number | null>(null);
-  const [backendScripted, setBackendScripted] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    if (phase !== 'generating' && phase !== 'saving') { setElapsed(0); return; }
-    const start = Date.now();
-    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
-    return () => clearInterval(timer);
-  }, [phase]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const c = await getCook(cookId);
-        const [v, n, vs] = await Promise.all([getVersion(c.base_version_id), countCookEvents(cookId), getVersions(c.recipe_id)]);
+        const [v, n] = await Promise.all([getVersion(c.base_version_id), countCookEvents(cookId)]);
         if (cancelled) return;
         setCook(c); setBase(v); setEvents(n);
-        setNextVersion((vs[0]?.number ?? v.number) + 1);
         void speaker.say(SPOKEN_ASK, 'step');
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
@@ -62,17 +48,12 @@ export default function RecapScreen() {
   }, [cookId]);
 
   async function generate(ratingOverride: number | null = rating): Promise<CookDiff | null> {
-    if (busy.current || !base) return null;
-    busy.current = true;
     setError(null);
     setPhase('generating');
     try {
-      if (hasAdaptations(base.recipe_json)) await requireAdaptationBackend();
       const data = await invokeFn<{ ok: boolean } & Record<string, unknown>>('recap', { cook_id: cookId, rating: ratingOverride, notes: notes.trim() });
       const parsed = CookDiffSchema.safeParse(data);
       if (!parsed.success) throw new Error(`Recap failed validation: ${parsed.error.issues[0]?.message ?? 'unknown'}`);
-      setBackendScripted(typeof data.scripted === 'boolean' ? data.scripted : null);
-      parsed.data.proposed_version = preserveIntentions(base.recipe_json, parsed.data.proposed_version);
       setResult(parsed.data);
       setPhase('review');
       void speaker.say(parsed.data.spoken_recap, 'step', undefined, { clamp: false });
@@ -81,27 +62,21 @@ export default function RecapScreen() {
       setError((e as Error).message);
       setPhase('rate');
       return null;
-    } finally { busy.current = false; }
+    }
   }
 
   async function save(r: CookDiff | null = result, ratingValue: number | null = rating) {
-    if (!cook || !base || !r || busy.current) return;
-    busy.current = true;
+    if (!cook || !base || !r) return;
     const result = r;
     setPhase('saving');
     try {
       await speaker.stopAll();
-      if (!savedRow.current) savedRow.current = await saveVersion({ recipeId: cook.recipe_id, parentId: base.id, recipe: result.proposed_version, diff: result.diff, rating: ratingValue, notes: notes.trim(), cookId });
-      if (savedRow.current.save_warnings?.length) {
-        setPhase('review');
-        Alert.alert(`Saved v${savedRow.current.number}`, savedRow.current.save_warnings.join('\n'), [{ text: 'Open history', onPress: () => router.replace(`/history/${cook.recipe_id}`) }]);
-        return;
-      }
+      await saveVersion({ recipeId: cook.recipe_id, parentId: base.id, recipe: result.proposed_version, diff: result.diff, rating: ratingValue, notes: notes.trim(), cookId });
       router.replace(`/history/${cook.recipe_id}`);
     } catch (e) {
       setError((e as Error).message);
       setPhase('review');
-    } finally { busy.current = false; }
+    }
   }
 
   // Demo-only: /recap/<id>?autorun=1 rates 8 and generates; autorun=save also saves v2 and opens Versions.
@@ -132,6 +107,7 @@ export default function RecapScreen() {
     );
   }
 
+  const nextVersion = (base?.number ?? 0) + 1;
 
   return (
     <Screen>
@@ -139,18 +115,13 @@ export default function RecapScreen() {
         <Title>{base?.recipe_json.title ?? 'Your cook'}</Title>
         <Muted>{events == null ? 'Loading…' : `${events} moments noticed while you cooked · based on v${base?.number ?? '?'}`}</Muted>
         {error && <ErrorBox message={error} />}
-        {demo && <Muted>DEMO recap: scripted sample, not measured camera results.</Muted>}
-        {!demo && backendScripted === true && <Muted>Backend STUB_MODE: sample recap, not real model analysis.</Muted>}
-        {!demo && result && backendScripted === null && <Muted>Backend mode was not reported by this deployment; live analysis is unverified.</Muted>}
-        {base && hasAdaptations(base.recipe_json) && <Muted>Saved intentional choices: {adaptationSummary(base.recipe_json)}. Compared against this selected version.</Muted>}
-        {(phase === 'generating' || phase === 'saving') && <Muted>{phase === 'generating' ? 'Analyzing the cook and writing a recap' : 'Saving the child recipe version'}… {elapsed}s. {phase === 'generating' ? 'Wait for completion or an error; no result has been saved yet.' : 'Keep this screen open until saving finishes.'}</Muted>}
 
         {phase !== 'review' && phase !== 'saving' ? (
           <>
             <Text style={s.section}>How did it turn out?</Text>
             <View style={s.grid}>
               {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
-                <Pressable key={n} disabled={phase !== 'rate'} onPress={() => setRating(n)} style={[s.rate, rating === n && s.rateOn]} accessibilityLabel={`Rate ${n} out of 10`}>
+                <Pressable key={n} onPress={() => setRating(n)} style={[s.rate, rating === n && s.rateOn]} accessibilityLabel={`Rate ${n} out of 10`}>
                   <Text style={[s.rateText, rating === n && s.rateTextOn]}>{n}</Text>
                 </Pressable>
               ))}
@@ -200,7 +171,7 @@ export default function RecapScreen() {
               </Card>
             )}
 
-            <Button title={savedRow.current ? `Open saved v${savedRow.current.number}` : `Save child version${nextVersion ? ` (next: v${nextVersion})` : ''}`} size="lg" loading={phase === 'saving'} onPress={() => void save()} />
+            <Button title={`Save as v${nextVersion}`} size="lg" loading={phase === 'saving'} onPress={() => void save()} />
             <Button title="Don't save" variant="ghost" disabled={phase === 'saving'} onPress={skip} />
           </>
         ) : null}

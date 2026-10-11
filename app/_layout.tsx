@@ -3,8 +3,6 @@ import { DarkTheme, Stack, ThemeProvider, useGlobalSearchParams, usePathname } f
 import { StatusBar } from 'expo-status-bar';
 import { colors } from '@/constants/theme';
 import { initAudio } from '@/lib/voice';
-import { preferences } from '@/lib/preferences';
-import { ImportJobs } from '@/lib/importJobs';
 
 const theme = {
   ...DarkTheme,
@@ -21,29 +19,26 @@ function RouteLogger() {
 
 export default function RootLayout() {
   useEffect(() => {
-    void preferences.load();
     initAudio().catch(e => console.warn('audio mode', e));
   }, []);
 
   return (
     <ThemeProvider value={theme}>
       <StatusBar style="light" />
-      <ImportJobs>
-        <RouteLogger />
-        <Stack
-          screenOptions={{
-            headerStyle: { backgroundColor: colors.bg },
-            headerTintColor: colors.text,
-            headerTitleStyle: { fontWeight: '700' },
-            contentStyle: { backgroundColor: colors.bg },
-            headerBackButtonDisplayMode: 'minimal',
-          }}>
-          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-          <Stack.Screen name="cook/[recipeId]" options={{ headerShown: false, gestureEnabled: false }} />
-          <Stack.Screen name="recap/[cookId]" options={{ title: 'Recap', headerBackVisible: false, gestureEnabled: false }} />
-          <Stack.Screen name="history/[recipeId]" options={{ title: 'Versions' }} />
-        </Stack>
-      </ImportJobs>
+      <RouteLogger />
+      <Stack
+        screenOptions={{
+          headerStyle: { backgroundColor: colors.bg },
+          headerTintColor: colors.text,
+          headerTitleStyle: { fontWeight: '700' },
+          contentStyle: { backgroundColor: colors.bg },
+          headerBackButtonDisplayMode: 'minimal',
+        }}>
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+        <Stack.Screen name="cook/[recipeId]" options={{ headerShown: false, gestureEnabled: false }} />
+        <Stack.Screen name="recap/[cookId]" options={{ title: 'Recap', headerBackVisible: false, gestureEnabled: false }} />
+        <Stack.Screen name="history/[recipeId]" options={{ title: 'Versions' }} />
+      </Stack>
     </ThemeProvider>
   );
 }

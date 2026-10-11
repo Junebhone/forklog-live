@@ -1,52 +1,33 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { Body, Button, Card, Chip, ErrorBox, Muted, Screen, Title } from '@/components/ui';
 import { colors, font, radius, space } from '@/constants/theme';
-import { imports, useImportJob } from '@/lib/importJobs';
-import type { Clip as Picked } from '@/lib/importController';
+import { createRecipe, deleteRecipe, uploadVideo } from '@/lib/db';
 import { useDemoMode } from '@/lib/demo';
 import { DEMO_CLIP } from '@/lib/demoData';
-import { CONF, VIDEO_LIMITS } from '@/lib/guards';
-import { IngredientReview } from '@/components/IngredientReview';
-import { ingredientReminders, reminderReviewKey } from '@/lib/restrictions';
-import { usePreferences } from '@/lib/preferences';
-import { supabaseConfigured } from '@/lib/supabase';
+import { CONF, RecipeSchema, VIDEO_LIMITS, type Recipe } from '@/lib/guards';
+import { uploadRefFrames } from '@/lib/refFrames';
+import { invokeFn, supabaseConfigured } from '@/lib/supabase';
+
+type Picked = { uri: string; mimeType: string; durationSec: number | null; bytes: number | null; name: string };
+type Phase = 'idle' | 'uploading' | 'extracting' | 'review';
+type Result = { recipeId: string; versionId: string; recipe: Recipe };
 
 export default function ImportScreen() {
   const demo = useDemoMode();
-  const { restrictions = [] } = usePreferences();
-  const [reviewAcknowledged, setReviewAcknowledged] = useState('');
-  const { autorun, jobId } = useLocalSearchParams<{ autorun?: string; jobId?: string }>();
+  const { autorun } = useLocalSearchParams<{ autorun?: string }>();
   const autoran = useRef(false);
   const [picked, setPicked] = useState<Picked | null>(null);
   const [caption, setCaption] = useState('');
-  const job = useImportJob();
-  const [localError, setError] = useState<string | null>(null);
-  const [variation, setVariation] = useState('');
-  const [source, setSource] = useState('');
-  const [newImport, setNewImport] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const picking = useRef(false);
-  const navigating = useRef(false);
-  const phase = newImport ? 'idle' : job?.stage ?? 'idle';
-  const result = newImport ? null : job?.result;
-  const frames = newImport ? null : job?.frames;
-  const error = localError ?? (newImport ? null : job?.error);
-  useFocusEffect(useCallback(() => { navigating.current = false; if (jobId && job?.id === jobId) setNewImport(false); }, [jobId, job?.id]));
-  useEffect(() => {
-    if (!job) return;
-    const draft = job.reviewed ?? job.draftInputs ?? job.inputs;
-    setPicked(draft.clip); setCaption(draft.caption);
-    setVariation(draft.variation); setSource(draft.source);
-    setNewImport(false);
-  }, [job?.id]);
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0); // seconds in the extracting phase, shown so a slow Gemini call does not look hung
+  const [result, setResult] = useState<Result | null>(null);
+  const [frames, setFrames] = useState<{ done: number; total: number } | null>(null);
 
   async function pick() {
-    if (picking.current || imports.locked) return;
-    picking.current = true;
-    try {
     setError(null);
     const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['videos'], allowsEditing: false, videoMaxDuration: VIDEO_LIMITS.maxSeconds, quality: 1 });
     if (res.canceled || !res.assets[0]) return;
@@ -57,22 +38,40 @@ export default function ImportScreen() {
     const mimeType = a.mimeType ?? (a.uri.toLowerCase().endsWith('.mov') ? 'video/quicktime' : 'video/mp4');
     if (!VIDEO_LIMITS.allowed.includes(mimeType)) { setError(`Unsupported format (${mimeType}). Use MP4 or MOV.`); return; }
     setPicked({ uri: a.uri, mimeType, durationSec, bytes: a.fileSize ?? null, name: a.fileName ?? 'video' });
-    } catch (e) { setError(`Could not choose video: ${(e as Error).message}. Try choosing it again.`); }
-    finally { picking.current = false; }
   }
 
-  function extract(clip: Picked | null = picked) {
+  async function extract(clip: Picked | null = picked) {
     if (!clip) return;
-    if (!supabaseConfigured && !demo) { setError('Backend not configured. Use demo mode from Library.'); return; }
+    const picked = clip;
+    if (!supabaseConfigured && !demo) { setError('Supabase is not configured. Add EXPO_PUBLIC_SUPABASE_URL and ANON_KEY to .env, or start the demo from the Library tab.'); return; }
     setError(null);
-    if (!imports.start({ clip, caption, variation, source }, demo)) setError('Finish reviewing the active import before starting another.');
-    else setNewImport(false);
+    let recipeId: string | null = null;
+    try {
+      setPhase('uploading');
+      recipeId = await createRecipe();
+      const path = await uploadVideo(picked.uri, recipeId, picked.mimeType);
+      setPhase('extracting');
+      const data = await invokeFn<{ ok: boolean; version_id: string; recipe: unknown }>('extract-recipe', { recipe_id: recipeId, video_path: path, caption_text: caption.trim() });
+      const parsed = RecipeSchema.safeParse(data.recipe);
+      if (!parsed.success) throw new Error(`Recipe failed validation: ${parsed.error.issues[0]?.message ?? 'unknown'}`);
+      const recipe = parsed.data;
+      setResult({ recipeId, versionId: data.version_id, recipe });
+      setPhase('review');
+      setFrames({ done: 0, total: recipe.steps.length });
+      // Reference frames upload in the background; the coach falls back to visual cues for any that fail.
+      uploadRefFrames(picked.uri, recipeId, data.version_id, recipe, (done, total) => setFrames({ done, total })).catch(() => {});
+    } catch (e) {
+      setError((e as Error).message);
+      setPhase('idle');
+      if (recipeId) deleteRecipe(recipeId).catch(() => {});
+    }
   }
+
   useEffect(() => {
-    if (!job || !['queued', 'uploading', 'extracting'].includes(job.stage)) return;
-    const tick = () => setElapsed(Math.floor((Date.now() - job.startedAt) / 1000));
-    tick(); const timer = setInterval(tick, 1000); return () => clearInterval(timer);
-  }, [job?.id, job?.stage]);
+    if (phase !== 'extracting') { setElapsed(0); return; }
+    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    return () => clearInterval(t);
+  }, [phase]);
 
   // Demo-only: /import?autorun=1 runs the demo clip through the whole flow (used for scripted walkthroughs).
   useEffect(() => {
@@ -84,22 +83,11 @@ export default function ImportScreen() {
   }, [demo, autorun]);
 
   function reset() {
-    if (imports.locked) return;
-    setPicked(null); setCaption(''); setVariation(''); setSource(''); setError(null); setNewImport(true); router.setParams({ jobId: undefined });
+    setPicked(null); setCaption(''); setResult(null); setFrames(null); setError(null); setPhase('idle');
   }
-  const reviewInputs = () => ({ clip: picked!, caption, variation, source });
-  const notesInputs = <>
-    <Text style={s.section}>Caption / source / variation notes</Text>
-    <TextInput style={s.input} placeholder="Caption" placeholderTextColor={colors.muted} multiline value={caption} onChangeText={v => { setCaption(v); if (!newImport) imports.editInputs({ caption: v }); }} editable={newImport || (!job?.applying && job?.stage !== 'ready')} />
-    <TextInput style={s.input} placeholder="Public source attribution (optional)" placeholderTextColor={colors.muted} value={source} onChangeText={v => { setSource(v); if (!newImport) imports.editInputs({ source: v }); }} editable={newImport || (!job?.applying && job?.stage !== 'ready')} />
-    <TextInput style={s.input} placeholder="Private variation notes (optional)" placeholderTextColor={colors.muted} multiline value={variation} onChangeText={v => { setVariation(v); if (!newImport) imports.editInputs({ variation: v }); }} editable={newImport || (!job?.applying && job?.stage !== 'ready')} />
-    <Muted size={14}>Extraction uses the caption captured at submission. Later edits are unapplied until review: saved as notes, without re-extraction or automatic ingredient changes. Edit ingredients during cooking.</Muted>
-  </>;
-  if (result && job && !newImport) {
+
+  if (phase === 'review' && result) {
     const r = result.recipe;
-    const reminders = ingredientReminders(r.ingredients, restrictions);
-    const key = reminderReviewKey(result.versionId, r.ingredients, restrictions);
-    const needsReview = reminders.length > 0 && reviewAcknowledged !== key;
     return (
       <Screen>
         <ScrollView contentContainerStyle={s.scroll} showsVerticalScrollIndicator={false}>
@@ -109,15 +97,10 @@ export default function ImportScreen() {
             {r.servings != null && <Chip label={`${r.servings} servings`} />}
             {r.total_minutes != null && <Chip label={`${r.total_minutes} min`} />}
             <Chip label={`${r.steps.length} steps`} />
-            {frames && <Chip label={frames.scripted ? `Demo frame progress ${frames.done}/${frames.total} (no images uploaded)` : frames.done < frames.total ? `Processing references ${frames.done}/${frames.total}` : `References: ${frames.succeeded} ready · ${frames.failed} failed`} tone={frames.scripted || frames.done < frames.total ? 'neutral' : frames.failed ? 'warn' : 'good'} />}
+            {frames && <Chip label={frames.done < frames.total ? `Reference frames ${frames.done}/${frames.total}` : 'Reference frames ready'} tone={frames.done < frames.total ? 'neutral' : 'good'} />}
           </View>
-          {error && <ErrorBox message={error} />}
-          {frames && !frames.scripted && frames.failed > 0 && <Muted size={14}>Some references failed. The saved recipe is available; coaching falls back to written visual cues for those steps.</Muted>}
           {r.warnings.map((w, i) => <Chip key={i} label={`⚠ ${w}`} tone="warn" />)}
 
-          {notesInputs}
-          <IngredientReview reminders={reminders} acknowledged={!needsReview} onAcknowledge={() => setReviewAcknowledged(key)} onLeave={() => router.navigate('/')} />
-          <Chip label={`Recipe: ${job.stage}`} tone="active" />
           <Text style={s.section}>Ingredients</Text>
           <Card>
             {r.ingredients.map((ing, i) => (
@@ -141,21 +124,14 @@ export default function ImportScreen() {
             </Card>
           ))}
 
-          {job.stage === 'review-needed' && <Button title="Confirm review & save notes" loading={job.applying} disabled={!job.referencesDone || needsReview} onPress={() => { if (!needsReview) void imports.applyReview(reviewInputs()); }} />}
-          {!job.referencesDone && <Muted>Waiting for reference attempts before copying links to the reviewed version. You can browse Library meanwhile.</Muted>}
-          {job.stage === 'failed' && <><Button title="Check saved result / recover" onPress={() => void imports.retry()} /><Button title="Leave failed review (retain saved versions)" variant="ghost" onPress={() => { imports.dismiss(); reset(); }} /></>}
-          <Button title="Browse library" variant="ghost" onPress={() => router.navigate('/')} />
-          {job.stage === 'ready' && <>
-            <Button title="Cook reviewed version" size="lg" disabled={needsReview} onPress={() => { if (navigating.current) return; navigating.current = true; router.push({ pathname: '/cook/[recipeId]', params: { recipeId: job.recipeId!, versionId: result.versionId } }); }} />
-            <Button title="Open library" variant="ghost" onPress={() => router.navigate('/')} />
-            <Button title="Import another video" variant="ghost" onPress={reset} />
-          </>}
+          <Button title="Cook it now" size="lg" onPress={() => { const id = result.recipeId; reset(); router.push(`/cook/${id}`); }} />
+          <Button title="Save to library" variant="ghost" onPress={() => { reset(); router.navigate('/'); }} />
         </ScrollView>
       </Screen>
     );
   }
 
-  const busy = ['queued', 'uploading', 'extracting'].includes(phase);
+  const busy = phase === 'uploading' || phase === 'extracting';
   return (
     <Screen>
       <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
@@ -185,22 +161,26 @@ export default function ImportScreen() {
           )}
         </Card>
 
-        {notesInputs}
-        <IngredientReview preliminary reminders={ingredientReminders([{ name: caption }], restrictions)} />
-        <Muted size={14}>Foreground only: you can browse recipes while the app stays active. Suspension or closing the app may interrupt processing.</Muted>
-        {phase === 'failed' && <Button title="Check saved result / retry upload" onPress={() => void imports.retry()} />}
-        {phase === 'failed' && !imports.locked && <Button title="Leave failed job (retain any server data)" variant="ghost" onPress={() => { imports.dismiss(); reset(); }} />}
-        {phase === 'failed' && <Muted>Recovery checks saved versions first. An uncertain extraction is never charged again automatically; saved recipes are retained.</Muted>}
+        <Text style={s.section}>Caption (optional)</Text>
+        <TextInput
+          style={s.input}
+          placeholder="Paste the post caption — it often has the quantities."
+          placeholderTextColor={colors.muted}
+          multiline
+          value={caption}
+          onChangeText={setCaption}
+          editable={!busy}
+        />
+
         {busy ? (
           <Card style={s.progress}>
             <ActivityIndicator color={colors.accent} />
-            <Body bold>{phase === 'queued' ? 'Queued' : phase === 'uploading' ? `Uploading video… ${elapsed}s` : `Watching the video and writing the recipe… ${elapsed}s`}</Body>
-            <Muted size={14}>{phase === 'uploading' ? (demo ? 'Demo: pretending to upload.' : 'Sending to your Supabase bucket.') : demo ? 'Demo: returning the sample recipe.' : 'Usually 30–90 s for a 60 s clip. Gemini can be slower at peak times; you can browse Library while it runs.'}</Muted>
+            <Body bold>{phase === 'uploading' ? 'Uploading video…' : `Watching the video and writing the recipe… ${elapsed}s`}</Body>
+            <Muted size={14}>{phase === 'uploading' ? (demo ? 'Demo: pretending to upload.' : 'Sending to your Supabase bucket.') : demo ? 'Demo: returning the sample recipe.' : 'Usually 30–90 s for a 60 s clip. Gemini can be slower at peak times; this screen waits up to 2½ minutes.'}</Muted>
           </Card>
         ) : (
-          <Button title="Extract recipe" size="lg" disabled={!picked || phase === 'failed' || imports.locked} onPress={() => void extract()} />
+          <Button title="Extract recipe" size="lg" disabled={!picked} onPress={() => void extract()} />
         )}
-        <Button title="Browse library" variant="ghost" onPress={() => router.navigate('/')} />
       </ScrollView>
     </Screen>
   );
