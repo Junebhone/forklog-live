@@ -75,7 +75,7 @@ export default function HistoryScreen() {
                     ))}
                     <Muted size={14}>{v.recipe_json.ingredients.length} ingredients · {v.recipe_json.steps.length} steps</Muted>
                     {v.recipe_json.ingredients.map((ing, i) => (
-                      <Muted key={i} size={15}>• {ing.qty}{ing.unit ? ` ${ing.unit}` : ''} {ing.name}</Muted>
+                      <Muted key={i} size={15}>• {ing.omitted ? 'Intentionally omitted: ' : `${ing.qty}${ing.unit ? ` ${ing.unit}` : ''} `}{ing.name}</Muted>
                     ))}
                   </View>
                 )}

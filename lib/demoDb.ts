@@ -3,6 +3,7 @@
 import type { CookRow, DiffItem, LibraryItem, VersionRow } from './db';
 import type { CoachEvent, Recipe } from './guards';
 import { DEMO_COACH_SCRIPT, DEMO_IDS, DEMO_RECAP, DEMO_RECIPE } from './demoData';
+import { hasAdaptations } from './recipeOptions';
 
 type RecipeRow = { id: string; title: string; source_summary: string | null; created_at: string };
 type EventRow = { cook_id: string; step_n: number; at: string; event: CoachEvent };
@@ -109,15 +110,19 @@ export const demoDb = {
     return vs[0];
   },
 
-  async saveVersion(opts: { recipeId: string; parentId: string; recipe: Recipe; diff: DiffItem[]; rating: number | null; notes: string; cookId: string }): Promise<VersionRow> {
+  async saveVersion(opts: { recipeId: string; parentId: string; recipe: Recipe; diff: DiffItem[]; rating: number | null; notes: string; cookId?: string }): Promise<VersionRow> {
+    const parent = await demoDb.getVersion(opts.parentId);
+    if (parent.recipe_id !== opts.recipeId) throw new Error('Parent version belongs to another recipe.');
+    const cook = opts.cookId ? await demoDb.getCook(opts.cookId) : null;
+    if (cook && cook.recipe_id !== opts.recipeId) throw new Error('Cook belongs to another recipe.');
+    if (cook?.saved_version_id) return demoDb.getVersion(cook.saved_version_id);
     await sleep(300);
     const vs = await demoDb.getVersions(opts.recipeId);
     const row: VersionRow = {
       id: newId('version'), recipe_id: opts.recipeId, number: (vs[0]?.number ?? 0) + 1, parent_id: opts.parentId,
-      recipe_json: opts.recipe, diff_json: opts.diff, rating: opts.rating, notes: opts.notes || null, is_best: false, created_at: now(),
+      recipe_json: JSON.parse(JSON.stringify(opts.recipe)), diff_json: opts.diff, rating: opts.rating, notes: opts.notes || null, is_best: false, created_at: now(),
     };
     state.versions.push(row);
-    const cook = state.cooks.find(c => c.id === opts.cookId);
     if (cook) { cook.saved_version_id = row.id; cook.rating = opts.rating; cook.notes = opts.notes || null; }
     const r = state.recipes.find(x => x.id === opts.recipeId);
     if (r) r.title = opts.recipe.title;
@@ -126,6 +131,13 @@ export const demoDb = {
 
   async setBestVersion(recipeId: string, versionId: string) {
     for (const v of state.versions) if (v.recipe_id === recipeId) v.is_best = v.id === versionId;
+  },
+
+  async activateCookVersion(cookId: string, versionId: string) {
+    const cook = await demoDb.getCook(cookId);
+    const version = await demoDb.getVersion(versionId);
+    if (cook.recipe_id !== version.recipe_id || cook.ended_at) throw new Error('Cannot activate this version for that cook.');
+    cook.base_version_id = versionId;
   },
 
   async startCook(recipeId: string, versionId: string): Promise<string> {
@@ -173,6 +185,12 @@ export async function demoInvoke<T>(name: string, body: Record<string, unknown>)
       const rating = typeof body.rating === 'number' ? body.rating : null;
       const notes = typeof body.notes === 'string' && body.notes.trim() ? body.notes.trim() : null;
       if (cook) { cook.ended_at = now(); cook.rating = rating; cook.notes = notes; }
+      const version = cook && state.versions.find(v => v.id === cook.base_version_id);
+      if (version && hasAdaptations(version.recipe_json)) return {
+        ok: true, diff: [], proposed_version: { ...version.recipe_json, notes: notes ?? version.recipe_json.notes },
+        spoken_recap: 'Your intentional changes are saved. This scripted demo cannot measure differences from an adapted cook.',
+        suggestion: null,
+      } as T;
       return {
         ok: true,
         ...DEMO_RECAP,

@@ -20,7 +20,7 @@ export const VersionRowSchema = z.object({
   is_best: z.boolean().nullable(),
   created_at: z.string(),
 });
-export type VersionRow = z.infer<typeof VersionRowSchema>;
+export type VersionRow = z.infer<typeof VersionRowSchema> & { save_warnings?: string[] };
 
 export const CookRowSchema = z.object({
   id: z.string(),
@@ -159,9 +159,19 @@ export async function saveVersion(opts: {
   diff: DiffItem[];
   rating: number | null;
   notes: string;
-  cookId: string;
+  cookId?: string; // optional for an intentional adaptation before resuming a cook
 }): Promise<VersionRow> {
   if (isDemoMode()) return demoDb.saveVersion(opts);
+  const parent = await getVersion(opts.parentId);
+  if (parent.recipe_id !== opts.recipeId) throw new Error('Parent version belongs to another recipe.');
+  RecipeSchema.parse(opts.recipe);
+  if (opts.cookId) {
+    const cook = await getCook(opts.cookId);
+    if (cook.recipe_id !== opts.recipeId) throw new Error('Cook belongs to another recipe.');
+    if (cook.saved_version_id) return getVersion(cook.saved_version_id); // retry a confirmed recap save
+  }
+  const { data: frames, error: frameReadError } = await supabase.from('ref_frames').select('step_n,storage_path').eq('version_id', opts.parentId);
+  if (frameReadError) fail('read parent reference frames', frameReadError);
   const existing = await getVersions(opts.recipeId);
   const number = (existing[0]?.number ?? 0) + 1;
   const { data, error } = await supabase
@@ -173,15 +183,30 @@ export async function saveVersion(opts: {
   const p = VersionRowSchema.safeParse(data);
   if (!p.success) throw new Error('saveVersion: row came back malformed');
   const saved = p.data;
+  const warnings: string[] = [];
 
   // Reuse the parent's reference frames so cooking the new version still gets creator images.
-  const { data: frames } = await supabase.from('ref_frames').select('step_n,storage_path').eq('version_id', opts.parentId);
   if (frames?.length) {
-    await supabase.from('ref_frames').upsert((frames as { step_n: number; storage_path: string }[]).map(f => ({ ...f, version_id: saved.id })));
+    const { error: frameError } = await supabase.from('ref_frames').upsert((frames as { step_n: number; storage_path: string }[]).map(f => ({ ...f, version_id: saved.id })));
+    if (frameError) warnings.push('Child version saved, but copying reference-frame links failed. Coaching will use available visual cues.');
   }
-  await supabase.from('cooks').update({ saved_version_id: saved.id, rating: opts.rating, notes: opts.notes || null }).eq('id', opts.cookId);
-  await supabase.from('recipes').update({ title: opts.recipe.title }).eq('id', opts.recipeId);
-  return saved;
+  if (opts.cookId) {
+    const { error: cookError } = await supabase.from('cooks').update({ saved_version_id: saved.id, rating: opts.rating, notes: opts.notes || null }).eq('id', opts.cookId);
+    if (cookError) warnings.push('Version saved, but linking it to the completed cook failed. Open it from recipe history.');
+  }
+  const { error: titleError } = await supabase.from('recipes').update({ title: opts.recipe.title }).eq('id', opts.recipeId);
+  if (titleError) warnings.push('Version saved, but updating the library title failed.');
+  return { ...saved, ...(warnings.length ? { save_warnings: warnings } : {}) };
+}
+
+/** Switch the paused cook only after the child version has actually been saved. No new schema needed. */
+export async function activateCookVersion(cookId: string, versionId: string): Promise<void> {
+  const [cook, version] = await Promise.all([getCook(cookId), getVersion(versionId)]);
+  if (cook.recipe_id !== version.recipe_id) throw new Error('That version belongs to another recipe.');
+  if (cook.ended_at) throw new Error('This cook has already ended.');
+  if (isDemoMode()) return demoDb.activateCookVersion(cookId, versionId);
+  const { data, error } = await supabase.from('cooks').update({ base_version_id: versionId }).eq('id', cookId).is('ended_at', null).select('id').single();
+  if (error || !data) fail('activateCookVersion', error);
 }
 
 export async function setBestVersion(recipeId: string, versionId: string) {

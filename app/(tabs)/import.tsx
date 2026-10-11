@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import { Body, Button, Card, Chip, ErrorBox, Muted, Screen, Title } from '@/components/ui';
 import { colors, font, radius, space } from '@/constants/theme';
@@ -8,7 +8,7 @@ import { createRecipe, deleteRecipe, uploadVideo } from '@/lib/db';
 import { useDemoMode } from '@/lib/demo';
 import { DEMO_CLIP } from '@/lib/demoData';
 import { CONF, RecipeSchema, VIDEO_LIMITS, type Recipe } from '@/lib/guards';
-import { uploadRefFrames } from '@/lib/refFrames';
+import { uploadRefFrames, type FrameProgress } from '@/lib/refFrames';
 import { invokeFn, supabaseConfigured } from '@/lib/supabase';
 
 type Picked = { uri: string; mimeType: string; durationSec: number | null; bytes: number | null; name: string };
@@ -25,9 +25,17 @@ export default function ImportScreen() {
   const [error, setError] = useState<string | null>(null);
   const [elapsed, setElapsed] = useState(0); // seconds in the extracting phase, shown so a slow Gemini call does not look hung
   const [result, setResult] = useState<Result | null>(null);
-  const [frames, setFrames] = useState<{ done: number; total: number } | null>(null);
+  const [frames, setFrames] = useState<FrameProgress | null>(null);
+  const extracting = useRef(false);
+  const picking = useRef(false);
+  const frameRun = useRef(0);
+  const navigating = useRef(false);
+  useFocusEffect(useCallback(() => { navigating.current = false; }, []));
 
   async function pick() {
+    if (picking.current || extracting.current) return;
+    picking.current = true;
+    try {
     setError(null);
     const res = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['videos'], allowsEditing: false, videoMaxDuration: VIDEO_LIMITS.maxSeconds, quality: 1 });
     if (res.canceled || !res.assets[0]) return;
@@ -38,13 +46,17 @@ export default function ImportScreen() {
     const mimeType = a.mimeType ?? (a.uri.toLowerCase().endsWith('.mov') ? 'video/quicktime' : 'video/mp4');
     if (!VIDEO_LIMITS.allowed.includes(mimeType)) { setError(`Unsupported format (${mimeType}). Use MP4 or MOV.`); return; }
     setPicked({ uri: a.uri, mimeType, durationSec, bytes: a.fileSize ?? null, name: a.fileName ?? 'video' });
+    } catch (e) { setError(`Could not choose video: ${(e as Error).message}. Try choosing it again.`); }
+    finally { picking.current = false; }
   }
 
   async function extract(clip: Picked | null = picked) {
-    if (!clip) return;
+    if (!clip || extracting.current) return;
     const picked = clip;
     if (!supabaseConfigured && !demo) { setError('Supabase is not configured. Add EXPO_PUBLIC_SUPABASE_URL and ANON_KEY to .env, or start the demo from the Library tab.'); return; }
     setError(null);
+    extracting.current = true;
+    const run = ++frameRun.current;
     let recipeId: string | null = null;
     try {
       setPhase('uploading');
@@ -57,19 +69,21 @@ export default function ImportScreen() {
       const recipe = parsed.data;
       setResult({ recipeId, versionId: data.version_id, recipe });
       setPhase('review');
-      setFrames({ done: 0, total: recipe.steps.length });
+      setFrames({ done: 0, total: recipe.steps.length, succeeded: 0, failed: 0, scripted: demo });
       // Reference frames upload in the background; the coach falls back to visual cues for any that fail.
-      uploadRefFrames(picked.uri, recipeId, data.version_id, recipe, (done, total) => setFrames({ done, total })).catch(() => {});
+      uploadRefFrames(picked.uri, recipeId, data.version_id, recipe, progress => { if (frameRun.current === run) setFrames(progress); }).catch(e => { if (frameRun.current === run) setError(`Recipe saved, but reference-frame processing failed: ${(e as Error).message}. Coaching will use visual cues.`); });
     } catch (e) {
       setError((e as Error).message);
       setPhase('idle');
       if (recipeId) deleteRecipe(recipeId).catch(() => {});
-    }
+    } finally { extracting.current = false; }
   }
 
   useEffect(() => {
-    if (phase !== 'extracting') { setElapsed(0); return; }
-    const t = setInterval(() => setElapsed(e => e + 1), 1000);
+    if (phase !== 'extracting' && phase !== 'uploading') { setElapsed(0); return; }
+    setElapsed(0);
+    const start = Date.now();
+    const t = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
     return () => clearInterval(t);
   }, [phase]);
 
@@ -83,6 +97,7 @@ export default function ImportScreen() {
   }, [demo, autorun]);
 
   function reset() {
+    frameRun.current++; // an earlier thumbnail job must not change a later import's status
     setPicked(null); setCaption(''); setResult(null); setFrames(null); setError(null); setPhase('idle');
   }
 
@@ -97,8 +112,10 @@ export default function ImportScreen() {
             {r.servings != null && <Chip label={`${r.servings} servings`} />}
             {r.total_minutes != null && <Chip label={`${r.total_minutes} min`} />}
             <Chip label={`${r.steps.length} steps`} />
-            {frames && <Chip label={frames.done < frames.total ? `Reference frames ${frames.done}/${frames.total}` : 'Reference frames ready'} tone={frames.done < frames.total ? 'neutral' : 'good'} />}
+            {frames && <Chip label={frames.scripted ? `Demo frame progress ${frames.done}/${frames.total} (no images uploaded)` : frames.done < frames.total ? `Processing references ${frames.done}/${frames.total}` : `References: ${frames.succeeded} ready · ${frames.failed} failed`} tone={frames.scripted || frames.done < frames.total ? 'neutral' : frames.failed ? 'warn' : 'good'} />}
           </View>
+          {error && <ErrorBox message={error} />}
+          {frames && !frames.scripted && frames.failed > 0 && <Muted size={14}>Some references failed. The saved recipe is available; coaching falls back to written visual cues for those steps.</Muted>}
           {r.warnings.map((w, i) => <Chip key={i} label={`⚠ ${w}`} tone="warn" />)}
 
           <Text style={s.section}>Ingredients</Text>
@@ -124,8 +141,8 @@ export default function ImportScreen() {
             </Card>
           ))}
 
-          <Button title="Cook it now" size="lg" onPress={() => { const id = result.recipeId; reset(); router.push(`/cook/${id}`); }} />
-          <Button title="Save to library" variant="ghost" onPress={() => { reset(); router.navigate('/'); }} />
+          <Button title="Cook it now" size="lg" onPress={() => { if (navigating.current) return; navigating.current = true; const id = result.recipeId; reset(); router.push(`/cook/${id}`); }} />
+          <Button title="Save to library" variant="ghost" onPress={() => { if (navigating.current) return; navigating.current = true; reset(); router.navigate('/'); }} />
         </ScrollView>
       </Screen>
     );
@@ -175,7 +192,7 @@ export default function ImportScreen() {
         {busy ? (
           <Card style={s.progress}>
             <ActivityIndicator color={colors.accent} />
-            <Body bold>{phase === 'uploading' ? 'Uploading video…' : `Watching the video and writing the recipe… ${elapsed}s`}</Body>
+            <Body bold>{phase === 'uploading' ? `Uploading video… ${elapsed}s` : `Watching the video and writing the recipe… ${elapsed}s`}</Body>
             <Muted size={14}>{phase === 'uploading' ? (demo ? 'Demo: pretending to upload.' : 'Sending to your Supabase bucket.') : demo ? 'Demo: returning the sample recipe.' : 'Usually 30–90 s for a 60 s clip. Gemini can be slower at peak times; this screen waits up to 2½ minutes.'}</Muted>
           </Card>
         ) : (

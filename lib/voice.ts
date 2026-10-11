@@ -14,6 +14,7 @@ export type Priority = 'step' | 'alert' | 'stop';
 const ORDER: Record<Priority, number> = { step: 0, alert: 1, stop: 2 };
 
 type Current =
+  | { kind: 'pending'; prio: Priority }
   | { kind: 'file'; prio: Priority; player: AudioPlayer; sub: { remove(): void } }
   | { kind: 'speech'; prio: Priority };
 
@@ -21,13 +22,17 @@ class Speaker {
   private current: Current | null = null;
   private queue: { text: string; prio: Priority }[] = [];
   private cache = new Map<string, string>(); // text -> file uri
+  private generating = new Map<string, Promise<string>>();
+  private stopping: Promise<void> | null = null;
+  private generation = 0;
   private muted = false;
   gate = new AlertGate();
   /** UI hook: the line currently being spoken (or null when silent). */
   onLine?: (text: string | null) => void;
+  onLoading?: (loading: boolean) => void;
 
   get isMuted() { return this.muted; }
-  setMuted(m: boolean) { this.muted = m; if (m) void this.interrupt(); }
+  setMuted(m: boolean) { this.muted = m; if (m) void this.stopAll(); }
 
   /** Pre-generate audio for lines we know we will say (step intros). Failures are ignored. */
   async prefetch(lines: string[]) {
@@ -40,10 +45,14 @@ class Speaker {
    * At most one queued line per priority: a newer alert replaces an older unspoken one.
    */
   async say(text: string, prio: Priority = 'alert', key?: string, opts: { clamp?: boolean } = {}) {
+    const generation = this.generation;
     if (key && !this.gate.allow(key, prio === 'stop' ? 'stop' : 'warn')) return;
     const line = opts.clamp === false ? text.trim() : this.gate.clamp(text);
     if (this.muted) { this.onLine?.(line); return; }
+    if (this.stopping) await this.stopping;
+    if (generation !== this.generation || this.muted) return;
     if (this.current && ORDER[prio] > ORDER[this.current.prio]) await this.interrupt();
+    if (generation !== this.generation || this.muted) return;
     if (this.current) {
       this.queue = this.queue.filter(q => q.prio !== prio);
       this.queue.push({ text: line, prio });
@@ -59,27 +68,41 @@ class Speaker {
     this.current = null;
     try {
       if (cur.kind === 'file') { cur.sub.remove(); cur.player.pause(); cur.player.remove(); }
-      else await Speech.stop();
+      else if (cur.kind === 'speech') {
+        const stopping = Speech.stop().catch(() => {});
+        this.stopping = stopping;
+        await stopping;
+        if (this.stopping === stopping) this.stopping = null;
+      }
     } catch { /* already released */ }
-    this.onLine?.(null);
+    if (!this.current) { this.onLine?.(null); this.onLoading?.(false); }
   }
 
   async stopAll() {
+    this.generation++;
     this.queue = [];
     await this.interrupt();
   }
 
   private async play(text: string, prio: Priority) {
+    if (this.muted) return;
+    const pending: Current = { kind: 'pending', prio };
+    this.current = pending; // reserve the speaker before awaiting TTS generation
+    this.onLine?.(text);
     if (!isDemoMode()) {
+      this.onLoading?.(true);
       try {
         const uri = await this.toFile(text);
+        if (this.current !== pending || this.muted) return;
         this.playFile(uri, text, prio);
         if (__DEV__) console.log(`[voice] ElevenLabs: ${text}`);
         return;
       } catch (e) {
+        if (this.current !== pending || this.muted) return;
         console.warn(`[voice] ElevenLabs failed, using device voice: ${(e as Error).message}`);
       }
     }
+    if (this.current !== pending || this.muted) return;
     this.playSpeech(text, prio);
   }
 
@@ -94,6 +117,7 @@ class Speaker {
     });
     cur.sub = sub;
     this.current = cur;
+    this.onLoading?.(false);
     this.onLine?.(text);
     player.play();
   }
@@ -101,6 +125,7 @@ class Speaker {
   private playSpeech(text: string, prio: Priority) {
     const cur: Current = { kind: 'speech', prio };
     this.current = cur;
+    this.onLoading?.(false);
     this.onLine?.(text);
     Speech.speak(text, {
       rate: 1.02,
@@ -124,6 +149,15 @@ class Speaker {
   private async toFile(text: string): Promise<string> {
     const hit = this.cache.get(text);
     if (hit) return hit;
+    const pending = this.generating.get(text);
+    if (pending) return pending;
+    const job = this.generateFile(text);
+    this.generating.set(text, job);
+    try { return await job; }
+    finally { this.generating.delete(text); }
+  }
+
+  private async generateFile(text: string): Promise<string> {
     const { data, error } = await supabase.functions.invoke<{ ok: boolean; audio_b64?: string }>('tts', { body: { text } });
     if (error) throw new Error(`tts request: ${error.message}`);
     if (!data?.ok || !data.audio_b64) throw new Error(`tts: ${(data as { error?: string } | null)?.error ?? 'no audio'}`);
