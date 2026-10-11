@@ -4,6 +4,7 @@ import { File } from 'expo-file-system';
 import { supabase, DEMO_USER_ID } from './supabase';
 import { RecipeSchema, DiffItemSchema, type Recipe } from './guards';
 import { isDemoMode } from './demo';
+import { notesWithAttribution } from './libraryTools';
 import { demoDb } from './demoDb';
 
 export type DiffItem = z.infer<typeof DiffItemSchema>;
@@ -39,6 +40,7 @@ export type LibraryItem = {
   title: string;
   source_summary: string | null;
   created_at: string;
+  search_ingredients?: string;
   latest: number;
   version_count: number;
   best_rating: number | null;
@@ -54,14 +56,17 @@ export async function listLibrary(): Promise<LibraryItem[]> {
   if (isDemoMode()) return demoDb.listLibrary();
   const { data, error } = await supabase
     .from('recipes')
-    .select('id,title,source_summary,created_at,versions(number,rating)')
+    .select('id,title,source_summary,created_at,versions(number,rating,recipe_json)')
     .order('created_at', { ascending: false });
   if (error) fail('listLibrary', error);
-  type Row = { id: string; title: string; source_summary: string | null; created_at: string; versions: { number: number; rating: number | null }[] | null };
+  type Row = { id: string; title: string; source_summary: string | null; created_at: string; versions: { number: number; rating: number | null; recipe_json?: unknown }[] | null };
   return ((data ?? []) as Row[]).map(r => {
     const vs = r.versions ?? [];
     const ratings = vs.map(v => v.rating).filter((x): x is number => typeof x === 'number');
+    const newest = [...vs].sort((a, b) => b.number - a.number)[0];
+    const parsed = RecipeSchema.safeParse(newest?.recipe_json);
     return {
+      search_ingredients: parsed.success ? parsed.data.ingredients.filter(i => !i.omitted).map(i => i.name).join(' ') : '',
       id: r.id,
       title: r.title,
       source_summary: r.source_summary,
@@ -176,7 +181,7 @@ export async function saveVersion(opts: {
   const number = (existing[0]?.number ?? 0) + 1;
   const { data, error } = await supabase
     .from('versions')
-    .insert({ recipe_id: opts.recipeId, number, parent_id: opts.parentId, recipe_json: opts.recipe, diff_json: opts.diff, rating: opts.rating, notes: opts.notes || null })
+    .insert({ recipe_id: opts.recipeId, number, parent_id: opts.parentId, recipe_json: opts.recipe, diff_json: opts.diff, rating: opts.rating, notes: notesWithAttribution(opts.notes, parent.notes) || null })
     .select('*')
     .single();
   if (error) fail('saveVersion', error);

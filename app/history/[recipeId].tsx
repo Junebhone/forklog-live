@@ -1,9 +1,11 @@
-import { useCallback, useState } from 'react';
-import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
+import { useCallback, useRef, useState } from 'react';
+import { FlatList, Pressable, Share, StyleSheet, Text, View } from 'react-native';
 import { router, Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Body, Button, Card, Centered, Chip, ErrorBox, Muted, Screen } from '@/components/ui';
 import { colors, font, space } from '@/constants/theme';
 import { getRecipeTitle, getVersions, setBestVersion, type DiffItem, type VersionRow } from '@/lib/db';
+
+import { shareVersionText, versionNotesLines } from '@/lib/libraryTools';
 
 const DIFF_WORD: Record<DiffItem['type'], string> = {
   added: 'added', removed: 'removed', changed_qty: 'qty', changed_time: 'time', reordered: 'reordered', skipped: 'skipped',
@@ -18,6 +20,8 @@ function summarize(diff: DiffItem[] | null): string {
 
 export default function HistoryScreen() {
   const { recipeId } = useLocalSearchParams<{ recipeId: string }>();
+  const sharing = useRef(false);
+  const [sharingId, setSharingId] = useState<string | null>(null);
   const [title, setTitle] = useState('Versions');
   const [versions, setVersions] = useState<VersionRow[] | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -41,6 +45,13 @@ export default function HistoryScreen() {
     try { await setBestVersion(recipeId, v.id); await load(); } catch (e) { setError((e as Error).message); }
   }
 
+  async function share(v: VersionRow) {
+    if (sharing.current) return;
+    sharing.current = true; setSharingId(v.id);
+    try { await Share.share({ message: shareVersionText(v), title: 'ForkLog recipe' }); }
+    catch (e) { setError(`Could not open sharing: ${(e as Error).message}`); }
+    finally { sharing.current = false; setSharingId(null); }
+  }
   return (
     <Screen>
       <Stack.Screen options={{ title }} />
@@ -63,8 +74,8 @@ export default function HistoryScreen() {
                     {v.rating != null && <Chip label={`★ ${v.rating}/10`} tone="good" />}
                   </View>
                 </View>
-                <Muted size={14}>{new Date(v.created_at).toLocaleString()} · {summarize(v.diff_json)}</Muted>
-                {v.notes ? <Body>“{v.notes}”</Body> : null}
+                <Muted size={14}>{new Date(v.created_at).toLocaleString()} · {v.parent_id && !v.diff_json?.length ? 'Reviewed notes; recipe unchanged' : summarize(v.diff_json)}</Muted>
+                {versionNotesLines(v.notes).map((line, i) => <Body key={i}>{line}</Body>)}
                 {expanded && (
                   <View style={s.details}>
                     {v.diff_json?.map((d, i) => (
@@ -79,6 +90,7 @@ export default function HistoryScreen() {
                     ))}
                   </View>
                 )}
+                <Button title={`Share v${v.number} as text`} variant="ghost" loading={sharingId === v.id} disabled={sharingId !== null} onPress={() => void share(v)} />
                 <View style={s.actions}>
                   <Button title={`Cook v${v.number}`} size="lg" style={{ flex: 1 }} onPress={() => router.push({ pathname: '/cook/[recipeId]', params: { recipeId, versionId: v.id } })} />
                   {!v.is_best && <Button title="Mark best" variant="ghost" size="lg" onPress={() => void markBest(v)} />}

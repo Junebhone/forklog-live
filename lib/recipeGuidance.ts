@@ -3,9 +3,12 @@ import { CONF, type Recipe } from './guards';
 import { hasAdaptations, ingredientKey, instructionText, quantityChanged, stepOptions } from './recipeOptions';
 import { SAFETY_DISCLAIMERS } from '../prompts/index';
 
+import { spanishPreset, type GuidanceLanguage } from './guidancePhrases';
+
 export type QuestionId = 'next' | 'howmuch' | 'look' | 'safe';
 
-export function answerRecipeQuestion(q: QuestionId, recipe: Recipe, stepN: number): string {
+export function answerRecipeQuestion(q: QuestionId, recipe: Recipe, stepN: number, language: GuidanceLanguage = 'en'): string {
+  if (language === 'es') return spanishPreset(q, recipe, stepN);
   const { step, expected, allOmitted } = stepOptions(recipe, stepN);
   if (!step) return 'Loading the recipe.';
   switch (q) {

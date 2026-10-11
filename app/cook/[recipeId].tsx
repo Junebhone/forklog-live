@@ -15,24 +15,23 @@ import { speaker } from '@/lib/voice';
 import { SPOKEN } from '@/prompts';
 import { adaptationSummary, hasAdaptations, ingredientDiff, ingredientKey, instructionText, stepOptions } from '@/lib/recipeOptions';
 import { requireAdaptationBackend } from '@/lib/supabase';
+import { preferences, usePreferences } from '@/lib/preferences';
+import { IngredientReview } from '@/components/IngredientReview';
+import { ingredientReminders, reminderReviewKey } from '@/lib/restrictions';
+import { PRESET_LABELS, UNTRANSLATED, type GuidanceLanguage } from '@/lib/guidancePhrases';
 import { answerRecipeQuestion as answer, type QuestionId } from '@/lib/recipeGuidance';
 
 // ----- tap-to-ask (stand-in for the ElevenLabs agent; answers come straight from the recipe) ----------
-const QUESTIONS: { id: QuestionId; label: string }[] = [
-  { id: 'next', label: "What's next?" },
-  { id: 'howmuch', label: 'How much goes in?' },
-  { id: 'look', label: 'What did it look like in the video?' },
-  { id: 'safe', label: 'Is it done?' },
-];
-
-function AskSheet({ visible, onClose, onAsk }: { visible: boolean; onClose: () => void; onAsk: (q: QuestionId) => void }) {
+function AskSheet({ visible, onClose, onAsk, language }: { language: GuidanceLanguage; visible: boolean; onClose: () => void; onAsk: (q: QuestionId) => void }) {
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={s.sheetBackdrop} onPress={onClose} accessibilityLabel="Close" />
       <View style={s.sheet}>
-        <Text style={s.sheetTitle}>Recipe guidance</Text>
+        <Text style={s.sheetTitle}>{language === 'es' ? 'Guía de la receta' : 'Recipe guidance'}</Text>
         <Muted size={14}>Preset answers from your selected recipe version. Tap a question; no microphone conversation.</Muted>
-        {QUESTIONS.map(q => <Button key={q.id} title={q.label} variant="ghost" size="lg" onPress={() => onAsk(q.id)} />)}
+        <View style={s.controls}><Button title="English" variant={language === 'en' ? 'primary' : 'ghost'} onPress={() => preferences.setLanguage('en')} /><Button title="Español" variant={language === 'es' ? 'primary' : 'ghost'} onPress={() => preferences.setLanguage('es')} /></View>
+        <Muted size={14}>{language === 'es' ? UNTRANSLATED : 'Local preset phrases only. Source text, ingredient names and units remain unchanged; camera coaching stays in English.'}</Muted>
+        {(Object.keys(PRESET_LABELS[language]) as QuestionId[]).map(id => <Button key={id} title={PRESET_LABELS[language][id]} variant="ghost" size="lg" onPress={() => onAsk(id)} />)}
         <Button title="Close" onPress={onClose} />
       </View>
     </Modal>
@@ -43,6 +42,7 @@ function AskSheet({ visible, onClose, onAsk }: { visible: boolean; onClose: () =
 export default function CookScreen() {
   const { recipeId, versionId, step: stepParam } = useLocalSearchParams<{ recipeId: string; versionId?: string; step?: string }>();
   const demo = useDemoMode();
+  const { language, restrictions = [], error: preferenceError } = usePreferences();
   useKeepAwake();
   const [perm, requestPerm] = useCameraPermissions();
   const camRef = useRef<CameraView>(null);
@@ -71,8 +71,13 @@ export default function CookScreen() {
   const [voiceLoadingAt, setVoiceLoadingAt] = useState<number | null>(null);
   const finishStarted = useRef(false);
   const [actionStartedAt, setActionStartedAt] = useState<number | null>(null);
+  const [reviewAcknowledged, setReviewAcknowledged] = useState('');
   const recipe = draft ?? version?.recipe_json;
   const dirty = !!(version && recipe && ingredientDiff(version.recipe_json, recipe).length);
+
+  const reminders = ingredientReminders(recipe?.ingredients ?? [], restrictions);
+  const reviewKey = reminderReviewKey(version?.id ?? '', recipe?.ingredients ?? [], restrictions);
+  const needsReview = reminders.length > 0 && reviewAcknowledged !== reviewKey;
 
   const steps = recipe?.steps ?? [];
   const step = steps.find(s => s.n === stepN) ?? steps[0];
@@ -105,7 +110,7 @@ export default function CookScreen() {
 
   // 2. Prefetch every step's audio, read step 1 once.
   useEffect(() => {
-    if (!version) return;
+    if (!version || needsReview) return;
     speaker.onLine = setCaption;
     speaker.onLoading = loading => setVoiceLoadingAt(loading ? Date.now() : null);
     const intros = version.recipe_json.steps.map(s => SPOKEN.stepIntro(s.n, instructionText(version.recipe_json, s.n)));
@@ -113,11 +118,13 @@ export default function CookScreen() {
     const first = version.recipe_json.steps.find(s => s.n === stepRef.current) ?? version.recipe_json.steps[0];
     if (first) void speaker.say(SPOKEN.stepIntro(first.n, instructionText(version.recipe_json, first.n)), 'step', undefined, { clamp: false });
     return () => { speaker.onLine = undefined; speaker.onLoading = undefined; setVoiceLoadingAt(null); void speaker.stopAll(); };
-  }, [version]);
+  }, [version, needsReview]);
+
+  useEffect(() => { setCaption(null); }, [language]);
 
   // 3. Coach events → chips + voice. Confidence/safety filtering already happened in VisionLoop.
   const handleEvent = useCallback((ev: CoachEvent, n: number) => {
-    if (n !== stepRef.current || actionBusy.current) return;
+    if (needsReview || n !== stepRef.current || actionBusy.current) return;
     setLastEvent(ev);
     if (ev.ingredient_added) {
       const name = ev.ingredient_added;
@@ -135,17 +142,17 @@ export default function CookScreen() {
     } else if (ev.step_state === 'matches_reference') {
       void speaker.say(SPOKEN.stepMatches(), 'alert', `match:${n}`);
     }
-  }, []);
+  }, [needsReview]);
 
   // 4. Start the vision loop once camera (or demo) + cook are ready.
   useEffect(() => {
-    if (!version || !cookId || !canRun || dirty || editing || saving || finishing) return;
+    if (!version || !cookId || !canRun || dirty || needsReview || editing || saving || finishing) return;
     const loop = new VisionLoop(camRef, version.recipe_json, recipeId, cookId, handleEvent, setStats);
     loopRef.current = loop;
     if (stepRef.current !== 1) loop.setStep(stepRef.current);
     loop.start();
     return () => { loop.stop(); loopRef.current = null; };
-  }, [version, cookId, canRun, recipeId, handleEvent, dirty, editing, saving, finishing]);
+  }, [version, cookId, canRun, recipeId, handleEvent, dirty, needsReview, editing, saving, finishing]);
 
   // Apply a ?step=N param (deep link / "resume") once the recipe is loaded, even if the param arrives after first render.
   useEffect(() => {
@@ -165,7 +172,9 @@ export default function CookScreen() {
     setLastEvent(null);
     loopRef.current?.setStep(n);
     speaker.gate.reset();
-    void speaker.stopAll().then(() => { if (stepRef.current === n) return speaker.say(SPOKEN.stepIntro(target.n, recipe ? instructionText(recipe, n) : target.text), 'step', undefined, { clamp: false }); });
+    const stopped = speaker.stopAll();
+    const speechRevision = speaker.revision;
+    void stopped.then(() => { if (speaker.revision === speechRevision && !needsReview && stepRef.current === n) return speaker.say(SPOKEN.stepIntro(target.n, recipe ? instructionText(recipe, n) : target.text), 'step', undefined, { clamp: false }); });
     void Haptics.selectionAsync();
   }
 
@@ -177,10 +186,10 @@ export default function CookScreen() {
 
   function ask(q: QuestionId) {
     setAsking(false);
-    if (!recipe) return;
-    const line = answer(q, recipe, stepN);
+    if (!recipe || needsReview) return;
+    const line = answer(q, recipe, stepN, language);
     setCaption(line); // visible immediately even while speech is loading
-    void speaker.say(line, 'alert', undefined, { clamp: false });
+    void speaker.say(line, 'alert', undefined, { clamp: false, language, fallbackText: answer(q, recipe, stepN, 'en') });
   }
 
   function changeIngredient(name: string, values: Partial<Recipe['ingredients'][number]>) {
@@ -221,6 +230,7 @@ export default function CookScreen() {
 
   function finish() {
     if (actionBusy.current) return;
+    if (needsReview) { setError('Review the ingredient reminders before continuing.'); return; }
     if (dirty) { setError('Save your ingredient changes or undo the draft before finishing.'); return; }
     actionBusy.current = true; // includes the confirmation dialog, preventing duplicate dialogs
     Alert.alert('Finish cooking?', 'ForkLog will compare your cook to the video.', [
@@ -293,6 +303,8 @@ export default function CookScreen() {
               <Text style={s.cue}>Source visual cue: {step.visual_cue}</Text>
             </View>
           )}
+          <IngredientReview reminders={reminders} acknowledged={!needsReview} onAcknowledge={() => setReviewAcknowledged(reviewKey)} onLeave={() => router.back()} />
+          {preferenceError && <ErrorBox message={preferenceError} />}
           {error && <ErrorBox message={error} />}
           {dirty && <Muted size={14}>Draft changes: coaching paused until saved. Original v{version?.number} is preserved.</Muted>}
           {demo && recipe && hasAdaptations(recipe) && <Muted size={14}>Adapted DEMO: recipe guidance only. Scripted camera comparisons are disabled.</Muted>}
@@ -314,7 +326,7 @@ export default function CookScreen() {
               {[...expected, ...omitted].map(name => <Pressable key={name} style={s.ingredientPill} accessibilityRole="button" accessibilityLabel={`${omitted.includes(name) ? 'Undo omission of' : 'Omit'} ${name}`} disabled={saving || !!pendingVersion.current} onPress={() => changeIngredient(name, { omitted: !omitted.includes(name) })}><Chip label={omitted.includes(name) ? `Omitted · ${name} ↶` : isDetected(name) ? `✓ ${name}${detectedAmount(name) ? ` · ${detectedAmount(name)}` : ''}` : name} tone={omitted.includes(name) ? 'neutral' : isDetected(name) ? 'good' : 'active'} /></Pressable>)}
               {extras.map(name => <Chip key={name} label={`? ${name}`} tone="warn" />)}
             </View>
-            <Pressable onPress={() => setAsking(true)} style={s.mic} accessibilityLabel="Preset recipe guidance">
+            <Pressable disabled={needsReview} onPress={() => setAsking(true)} style={s.mic} accessibilityLabel="Preset recipe guidance">
               <Text style={s.micIcon}>?</Text>
               <Text style={s.micLabel}>Guide</Text>
             </Pressable>
@@ -326,17 +338,17 @@ export default function CookScreen() {
           <View style={s.controls}>
             <Button title="Back" variant="ghost" size="lg" disabled={stepN <= 1} onPress={() => goStep(stepN - 1)} />
             <Button title={stepN >= steps.length ? 'Last step' : 'Next step'} size="lg" style={{ flex: 1 }} disabled={!steps.length || stepN >= steps.length} onPress={() => goStep(stepN + 1)} />
-            <Button title="I'm done" variant="danger" size="lg" loading={finishing} disabled={!cookId || saving || dirty} onPress={finish} />
+            <Button title="I'm done" variant="danger" size="lg" loading={finishing} disabled={!cookId || saving || dirty || needsReview} onPress={finish} />
           </View>
           <Text style={s.stats}>
             {canRun ? '● ' : '○ '}
             {demo ? 'demo · ' : stats?.scripted === true ? 'backend STUB_MODE · ' : stats?.scripted == null ? 'backend mode unverified · ' : ''}
-            {dirty || editing ? 'coaching paused' : stats?.processing ? `Analyzing frame… ${Math.max(0, Math.floor((now - (stats.startedAt ?? now)) / 1000))}s` : stats ? `${stats.sent} sent · ${stats.ok} ok · ${stats.skipped} still${stats.lastLatencyMs != null ? ` · ${stats.lastLatencyMs} ms` : ''}` : canRun ? 'starting' : 'waiting for camera'}
+            {dirty || editing || needsReview ? 'coaching paused' : stats?.processing ? `Analyzing frame… ${Math.max(0, Math.floor((now - (stats.startedAt ?? now)) / 1000))}s` : stats ? `${stats.sent} sent · ${stats.ok} ok · ${stats.skipped} still${stats.lastLatencyMs != null ? ` · ${stats.lastLatencyMs} ms` : ''}` : canRun ? 'starting' : 'waiting for camera'}
             {stats?.lastError ? ` · ${stats.lastError.slice(0, 40)}` : ''}
           </Text>
         </View>
       </SafeAreaView>
-      <AskSheet visible={asking} onClose={() => setAsking(false)} onAsk={ask} />
+      <AskSheet language={language} visible={asking} onClose={() => setAsking(false)} onAsk={ask} />
       <Modal visible={editing} transparent animationType="slide" onRequestClose={() => { if (!saving) setEditing(false); }}>
         <View style={s.sheetBackdrop} />
         <View style={[s.sheet, { maxHeight: '85%' }]}>
@@ -351,6 +363,7 @@ export default function CookScreen() {
               </View>
             </View>)}
           </ScrollView>
+          {preferenceError && <ErrorBox message={preferenceError} />}
           {error && <ErrorBox message={error} />}
           {saving && <Muted size={14}>Saving and attaching the child version… {Math.max(0, Math.floor((now - (actionStartedAt ?? now)) / 1000))}s</Muted>}
           {dirty && <Button title={pendingVersion.current ? 'Retry attach saved version' : 'Save child version & apply'} loading={saving} onPress={() => void applyOptions()} />}

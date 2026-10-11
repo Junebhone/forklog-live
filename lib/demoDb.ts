@@ -3,6 +3,7 @@
 import type { CookRow, DiffItem, LibraryItem, VersionRow } from './db';
 import type { CoachEvent, Recipe } from './guards';
 import { DEMO_COACH_SCRIPT, DEMO_IDS, DEMO_RECAP, DEMO_RECIPE } from './demoData';
+import { notesWithAttribution } from './libraryTools';
 import { hasAdaptations } from './recipeOptions';
 
 type RecipeRow = { id: string; title: string; source_summary: string | null; created_at: string };
@@ -65,6 +66,7 @@ export const demoDb = {
         const ratings = vs.map(v => v.rating).filter((x): x is number => typeof x === 'number');
         return {
           id: r.id, title: r.title, source_summary: r.source_summary, created_at: r.created_at,
+          search_ingredients: [...vs].sort((a, b) => b.number - a.number)[0]?.recipe_json.ingredients.filter(i => !i.omitted).map(i => i.name).join(' ') ?? '',
           latest: vs.reduce((m, v) => Math.max(m, v.number), 0),
           version_count: vs.length,
           best_rating: ratings.length ? Math.max(...ratings) : null,
@@ -120,7 +122,7 @@ export const demoDb = {
     const vs = await demoDb.getVersions(opts.recipeId);
     const row: VersionRow = {
       id: newId('version'), recipe_id: opts.recipeId, number: (vs[0]?.number ?? 0) + 1, parent_id: opts.parentId,
-      recipe_json: JSON.parse(JSON.stringify(opts.recipe)), diff_json: opts.diff, rating: opts.rating, notes: opts.notes || null, is_best: false, created_at: now(),
+      recipe_json: JSON.parse(JSON.stringify(opts.recipe)), diff_json: opts.diff, rating: opts.rating, notes: notesWithAttribution(opts.notes, parent.notes) || null, is_best: false, created_at: now(),
     };
     state.versions.push(row);
     if (cook) { cook.saved_version_id = row.id; cook.rating = opts.rating; cook.notes = opts.notes || null; }

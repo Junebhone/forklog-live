@@ -156,7 +156,7 @@ test('adapted scripted demo emits no fabricated camera comparisons', () => {
   assert.equal(events.length, 0); loop.stop();
 });
 
-function voiceSetup(sources = {}, stop = async () => {}) {
+function voiceSetup(sources = {}, stop = async () => {}, voices = []) {
   const requests = []; const played = []; const speech = []; const lines = [];
   const load = loader({
     'lib/demo.ts': { isDemoMode: () => false },
@@ -164,7 +164,7 @@ function voiceSetup(sources = {}, stop = async () => {}) {
     'lib/image.ts': { base64ToBytes: () => new Uint8Array([0]) },
     'expo-file-system': { Paths: { cache: 'mock://cache' }, File: class { constructor(_p, name) { this.uri = name; } write() {} } },
     'expo-audio': { createAudioPlayer: ({ uri }) => ({ addListener: () => ({ remove() {} }), play: () => played.push(uri), pause() {}, remove() {} }), setAudioModeAsync: async () => {} },
-    'expo-speech': { speak: (text, options) => speech.push({ text, options }), stop },
+    'expo-speech': { speak: (text, options) => speech.push({ text, options }), stop, getAvailableVoicesAsync: async () => voices },
   }, {}, sources);
   const speaker = load('lib/voice.ts').speaker;
   speaker.onLine = text => lines.push(text);
@@ -398,7 +398,7 @@ test('original baseline commit reproduces stale coach and pending-speech bugs un
   await originalVoice.speaker.stopAll();
 });
 
-function cookHarness({ failAttachOnce = false } = {}) {
+function cookHarness({ failAttachOnce = false, restrictions = [] } = {}) {
   // Hook/event smoke test, not a native render or layout test.
   const cells = []; let index = 0; let dirty = true; let tree; let component; const pendingEffects = [];
   const equalDeps = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
@@ -410,6 +410,8 @@ function cookHarness({ failAttachOnce = false } = {}) {
   };
   const dataLoad = loader(); const db = dataLoad('lib/demoDb.ts').demoDb; const ids = dataLoad('lib/demoData.ts').DEMO_IDS;
   const capability = deferred(); const counts = { save: 0, attach: 0, capability: 0 }; const spoken = []; const loops = [];
+  let prefsLanguage = 'en';
+  const voice = { revision: 0, isMuted: false, gate: { reset() {} }, prefetch: async () => {}, stopAll: async () => { voice.revision++; }, setMuted() {}, say: async line => { spoken.push(line); } };
   const load = loader({
     react: hooks,
     'react-native': { View: 'View', Text: 'Text', TextInput: 'TextInput', ScrollView: 'ScrollView', Modal: 'Modal', Pressable: 'Pressable', StyleSheet: { create: value => value, absoluteFill: {} }, Alert: { alert() {} } },
@@ -418,10 +420,11 @@ function cookHarness({ failAttachOnce = false } = {}) {
     'expo-camera': { CameraView: 'CameraView', useCameraPermissions: () => [{ granted: false }, async () => {}] },
     'expo-keep-awake': { useKeepAwake() {} },
     'expo-haptics': { selectionAsync: async () => {}, impactAsync: async () => {}, notificationAsync: async () => {}, ImpactFeedbackStyle: {}, NotificationFeedbackType: {} },
-    'components/ui.tsx': Object.fromEntries(['Button', 'Centered', 'Chip', 'ErrorBox', 'Muted'].map(name => [name, name])),
+    'components/ui.tsx': Object.fromEntries(['Body', 'Button', 'Card', 'Centered', 'Chip', 'ErrorBox', 'Muted'].map(name => [name, name])),
     'lib/demo.ts': { useDemoMode: () => true },
+    'lib/preferences.ts': { usePreferences: () => ({ language: prefsLanguage, error: null, restrictions }), preferences: { setLanguage(value) { prefsLanguage = value; dirty = true; void voice.stopAll(); } } },
     'lib/supabase.ts': { requireAdaptationBackend: () => { counts.capability++; return capability.promise; } },
-    'lib/voice.ts': { speaker: { isMuted: false, gate: { reset() {} }, prefetch: async () => {}, stopAll: async () => {}, setMuted() {}, say: async line => { spoken.push(line); } } },
+    'lib/voice.ts': { speaker: voice },
     'lib/visionLoop.ts': { VisionLoop: class { constructor(_camera, r) { this.recipe = r; loops.push(this); } start() { this.active = true; } stop() { this.active = false; } setStep(n) { this.step = n; } } },
     'lib/db.ts': { ...db, saveVersion: async opts => { counts.save++; return db.saveVersion(opts); }, activateCookVersion: async (...args) => { counts.attach++; if (failAttachOnce && counts.attach === 1) throw new Error('mock attachment failed'); return db.activateCookVersion(...args); } },
   });
@@ -443,7 +446,7 @@ function cookHarness({ failAttachOnce = false } = {}) {
   const pressLabel = label => { const result = find(node => node.props.accessibilityLabel === label)[0]; assert(result, `${label} exists`); result.props.onPress(); render(); };
   async function settle() { await flush(); render(); await flush(); render(); }
   async function waitFor(predicate) { for (let i = 0; i < 100 && !predicate(); i++) { await new Promise(r => setTimeout(r, 10)); render(); } assert(predicate(), 'expected async screen state'); }
-  return { render, find, button, pressLabel, settle, waitFor, capability, counts, loops, db, ids, spoken,
+  return { render, find, button, pressLabel, settle, waitFor, capability, counts, loops, db, ids, spoken, voice,
     unmount: () => cells.forEach(cell => cell?.cleanup?.()) };
 }
 
@@ -496,4 +499,306 @@ test('app capability gate requires both deployed functions and sends read-only p
   });
   await assert.rejects(load('lib/supabase.ts').requireAdaptationBackend(), /coach-frame and recap/);
   assert.equal(calls.length, 2); assert(calls.every(call => call.body.capability_check === true && !call.body.cook_id));
+});
+
+// Increment 2: deterministic foreground lifecycle and readable selected-version export.
+function importHarness(overrides = {}) {
+  const load = loader(); const r = recipe(load); const calls = { extract: 0, upload: 0, save: 0 };
+  const versions = []; const refs = deferred();
+  const deps = {
+    createRecipe: async () => 'import-recipe',
+    uploadVideo: async () => { calls.upload++; return 'import-recipe/source.mp4'; },
+    extract: async () => { calls.extract++; return { version_id: 'import-v1', recipe: r }; },
+    getVersions: async () => versions,
+    saveVersion: async opts => { calls.save++; return { id: 'import-v2', recipe_json: opts.recipe }; },
+    frames: async (_uri, _id, _version, _r, progress) => { progress({ done: 1, total: 1, succeeded: 0, failed: 1, scripted: false }); await refs.promise; },
+    ...overrides,
+  };
+  const controller = new (load('lib/importController.ts').ImportController)(deps);
+  const inputs = { clip: { uri: 'local', mimeType: 'video/mp4', durationSec: 10, bytes: 500, name: 'clip' }, caption: 'original caption', variation: 'private', source: 'creator' };
+  return { controller, deps, calls, versions, refs, inputs, r };
+}
+test('foreground import survives subscribers leaving, snapshots inputs, blocks duplicates and waits for reference attempts', async () => {
+  const h = importHarness(); const notices = []; h.controller.onNotice(j => notices.push(j.stage));
+  const unsubscribe = h.controller.subscribe(() => {});
+  assert(h.controller.start(h.inputs, false)); unsubscribe();
+  assert.equal(h.controller.start(h.inputs, false), false);
+  h.inputs.caption = 'later'; await flush();
+  assert.equal(h.controller.getSnapshot().inputs.caption, 'original caption');
+  assert.equal(h.controller.getSnapshot().stage, 'review-needed');
+  h.controller.editInputs({ caption: 'review only' });
+  assert.equal(h.controller.getSnapshot().draftInputs.caption, 'review only');
+  assert.equal(h.calls.extract, 1);
+  assert.equal(await h.controller.applyReview(h.inputs), false);
+  h.refs.resolve(); await flush();
+  const first = h.controller.applyReview(h.inputs);
+  assert.equal(await h.controller.applyReview(h.inputs), false);
+  assert(await first); assert.equal(h.calls.save, 1);
+  assert.equal(h.controller.getSnapshot().stage, 'ready');
+  assert.equal(h.controller.getSnapshot().frames.failed, 1);
+  assert.deepEqual(notices, ['review-needed']);
+});
+test('lost extraction response recovers saved recipe without deletion or repeat extraction', async () => {
+  const h = importHarness(); h.deps.extract = async () => { h.calls.extract++; h.versions.push({ id: 'saved-v1', number: 1, recipe_json: h.r }); throw Error('response lost'); };
+  h.controller.start(h.inputs, false); await flush();
+  assert.equal(h.controller.getSnapshot().stage, 'review-needed');
+  assert.equal(h.controller.getSnapshot().result.versionId, 'saved-v1');
+  assert.equal(h.calls.extract, 1); h.refs.resolve(); await flush();
+});
+test('unknown extraction outcome retries recovery reads only; upload failure safely retries same recipe', async () => {
+  const h = importHarness({ extract: async () => { throw Error('network unknown'); } });
+  h.controller.start(h.inputs, false); await flush(); await h.controller.retry();
+  assert.equal(h.controller.getSnapshot().stage, 'failed');
+  assert.match(h.controller.getSnapshot().error, /not resubmitted/);
+  const upload = deferred(); const g = importHarness(); let attempts = 0;
+  g.deps.uploadVideo = async () => { if (++attempts === 1) throw Error('upload interrupted'); return 'same/path'; };
+  g.controller.start(g.inputs, false); await flush(); await g.controller.retry(); await flush();
+  assert.equal(g.controller.getSnapshot().stage, 'review-needed'); assert.equal(attempts, 2); g.refs.resolve();
+});
+test('ambiguous review save recovers child, avoids duplicate insert and ignores late old-job reference callbacks', async () => {
+  const h = importHarness(); h.controller.start(h.inputs, false); await flush(); h.refs.resolve(); await flush();
+  h.deps.saveVersion = async o => { h.calls.save++; h.versions.push({ id: 'saved-child', parent_id: o.parentId, notes: o.notes, recipe_json: o.recipe }); throw Error('lost insert response'); };
+  assert(await h.controller.applyReview(h.inputs)); assert.equal(h.calls.save, 1);
+  assert.equal(h.controller.getSnapshot().result.versionId, 'saved-child');
+  assert(h.controller.start(h.inputs, false)); await flush(); assert.equal(h.calls.extract, 2);
+});
+test('library search/Recent/Processing use included ingredients and actual timestamps; export excludes private fields and media URLs', () => {
+  const load = loader(); const tools = load('lib/libraryTools.ts'); const now = Date.parse('2026-10-11T16:00:00Z');
+  const items = [{ id:'a', title:'Noodles', source_summary:'creator', search_ingredients:'soy sauce', created_at:'2026-10-10T16:00:00Z', version_count:1 }, {id:'b',title:'Old',created_at:'2026-09-01T16:00:00Z',version_count:0}];
+  assert.equal(tools.filterLibrary(items,'soy','All',now).length,1);
+  assert.equal(tools.filterLibrary(items,'','Recent',now).length,1);
+  assert.equal(tools.filterLibrary(items,'','Processing',now)[0].id,'b');
+  const r = omittedRecipe(load); r.notes = 'SECRET'; r.source_summary = 'Creator https://private.supabase.co/storage/secret';
+  const text = tools.shareVersionText({number:2,recipe_json:r,notes:JSON.stringify({variation_notes:'PRIVATE',source_attribution:'Public creator'})});
+  assert.match(text,/v2/); assert.match(text,/Intentionally omitted.*garlic/); assert.match(text,/Attribution: Public creator/);
+  assert(!text.includes('SECRET')); assert(!text.includes('PRIVATE')); assert(!text.includes('supabase.co')); assert(!text.includes('private.supabase'));
+  assert(!text.split('Steps')[0].includes('cloves garlic'));
+});
+
+test('Spanish local presets preserve exact canonical amounts and omission behavior without translating source', () => {
+  const load = loader(); const r = omittedRecipe(load); const a = load('lib/recipeGuidance.ts').answerRecipeQuestion;
+  const soy = r.ingredients.find(i => i.name === 'soy sauce'); soy.source_qty = soy.qty; soy.source_unit = soy.unit; soy.qty = '1½';
+  assert.match(a('howmuch',r,3,'es'),/omitieron intencionalmente/);
+  const step = r.steps.find(s => s.ingredients.includes('soy sauce')).n;
+  const spanish = a('howmuch',r,step,'es'); assert.match(spanish,/1½ tbsp soy sauce/); assert(!spanish.includes('aproximadamente 1½'));
+  assert(a('howmuch',r,step,'en').includes('1½ tbsp soy sauce'));
+  assert.match(a('look',r,step,'es'),/sin traducir/); assert.match(a('safe',r,step,'es'),/termómetro/);
+  assert.deepEqual(plain(r.steps.map(s=>s.ingredients)),recipe(load).steps.map(s=>s.ingredients));
+});
+test('preference persistence is separate from resettable demo recipes and late reads cannot overwrite user edits', async () => {
+  const load = loader(); const Store = load('lib/preferencesStore.ts').PreferencesStore;
+  let disk = null; let stops = 0; const read = deferred();
+  const prefs = new Store({read:()=>read.promise,write:t=>{disk=t;}},()=>{stops++;});
+  const loading = prefs.load(); prefs.setLanguage('es'); read.resolve('{"language":"en"}'); await loading;
+  assert.equal(prefs.getSnapshot().language,'es'); assert.equal(JSON.parse(disk).language,'es');
+  load('lib/demoDb.ts').resetDemo(); assert.equal(prefs.getSnapshot().language,'es');
+  const restored = new Store({read:async()=>disk,write(){}},()=>{}); await restored.load(); assert.equal(restored.getSnapshot().language,'es');
+  assert.equal(stops,1);
+  const broken = new Store({read:async()=>'{bad',write(){throw Error('disk full');}},()=>{});
+  await broken.load(); assert.match(broken.getSnapshot().error,/Preferences/); broken.setLanguage('es'); assert.match(broken.getSnapshot().error,/could not be saved/);
+});
+function spanishVoiceSetup(voices) {
+  const speech=[]; const stop=[]; let tts=0;
+  const load=loader({
+    'lib/demo.ts':{isDemoMode:()=>false}, 'lib/supabase.ts':{supabase:{functions:{invoke:async()=>{tts++; throw Error('should not call TTS');}}}},
+    'lib/image.ts':{base64ToBytes:()=>new Uint8Array()}, 'expo-file-system':{Paths:{cache:'mock'},File:class{}},
+    'expo-audio':{createAudioPlayer(){},setAudioModeAsync:async()=>{}},
+    'expo-speech':{getAvailableVoicesAsync:()=>voices,stop:async()=>{stop.push(1);},speak:(text,options)=>speech.push({text,options})}
+  });
+  return {speaker:load('lib/voice.ts').speaker,speech,stop,get tts(){return tts;}};
+}
+test('Spanish device speech matches language, avoids cloud TTS, and falls back to English if voice is missing', async () => {
+  const v=spanishVoiceSetup(Promise.resolve([{language:'es-MX',identifier:'spanish'}]));
+  await v.speaker.say('¿Cuánto?', 'alert',undefined,{language:'es',fallbackText:'How much?',clamp:false});
+  assert.equal(v.speech[0].options.voice,'spanish'); assert.equal(v.speech[0].options.language,'es-MX'); assert.equal(v.tts,0);
+  const missing=spanishVoiceSetup(Promise.resolve([])); const lines=[]; missing.speaker.onLine=x=>lines.push(x);
+  await missing.speaker.say('¿Cuánto?', 'alert',undefined,{language:'es',fallbackText:'How much?'});
+  assert.equal(missing.speech[0].text,'How much?'); assert.equal(missing.speech[0].options.language,'en-US'); assert.match(lines.at(-1),/English fallback/);
+});
+test('language switch cancels a pending Spanish voice lookup and an old device callback cannot stop new speech', async () => {
+  const voices=deferred(); const v=spanishVoiceSetup(voices.promise);
+  const pending=v.speaker.say('Viejo', 'step',undefined,{language:'es',fallbackText:'Old'});
+  await v.speaker.stopAll(); voices.resolve([{language:'es',identifier:'es'}]); await pending;
+  assert.equal(v.speech.length,0);
+  await v.speaker.say('Nuevo','step',undefined,{language:'es',fallbackText:'New'});
+  const old=v.speech[0].options;
+  await v.speaker.stopAll(); await v.speaker.say('Segundo','step',undefined,{language:'es',fallbackText:'Second'});
+  old.onDone(); assert.equal(v.speech.length,2); assert.equal(v.stop.length,1);
+});
+
+test('late reference progress from a completed job cannot update a later import', async () => {
+  const h=importHarness(); const callbacks=[];
+  h.deps.frames=async (_u,_i,_v,_r,p)=>{callbacks.push(p);};
+  h.controller.start(h.inputs,false); await flush();
+  assert(await h.controller.applyReview(h.inputs));
+  const oldId=h.controller.getSnapshot().id;
+  h.controller.start(h.inputs,false); await flush();
+  callbacks[0]({done:99,total:99,succeeded:99,failed:0,scripted:false});
+  assert.notEqual(h.controller.getSnapshot().id,oldId); assert.equal(h.controller.getSnapshot().frames.done,0);
+});
+test('Spanish runtime speech errors keep the English fallback and stale error callbacks cannot replace it', async () => {
+  const v=spanishVoiceSetup(Promise.resolve([{language:'es-ES',identifier:'es'}]));
+  await v.speaker.say('Texto','alert',undefined,{language:'es',fallbackText:'English'});
+  v.speech[0].options.onError(Error('voice unavailable'));
+  assert.equal(v.speech[1].text,'English'); assert.equal(v.speech[1].options.language,'en-US');
+  v.speech[0].options.onError(Error('late')); assert.equal(v.speech.length,2);
+});
+
+function screenHarness(file, mocks = {}, params = {}) {
+  const cells=[]; let index=0; let dirty=true; let tree; const effects=[]; const routes=[];
+  const same=(a,b)=>a&&b&&a.length===b.length&&a.every((x,i)=>Object.is(x,b[i]));
+  const hooks={
+    useState(initial){const i=index++; if(!cells[i]) cells[i]={value:typeof initial==='function'?initial():initial}; return [cells[i].value,v=>{cells[i].value=typeof v==='function'?v(cells[i].value):v;dirty=true;}];},
+    useRef(initial){const i=index++;return cells[i]??={current:initial};},
+    useEffect(fn,deps){const i=index++;if(!same(cells[i]?.deps,deps)){const old=cells[i];cells[i]={deps};effects.push(()=>{old?.cleanup?.();cells[i].cleanup=fn();});}},
+    useCallback(fn,deps){const i=index++;if(!same(cells[i]?.deps,deps))cells[i]={value:fn,deps};return cells[i].value;},
+    useSyncExternalStore(subscribe,get){const i=index++;if(!cells[i])cells[i]={cleanup:subscribe(()=>{dirty=true;})};return get();},
+  };
+  const native=Object.fromEntries(['View','Text','TextInput','ScrollView','ActivityIndicator','FlatList','Pressable','RefreshControl'].map(x=>[x,x]));
+  const load=loader({react:hooks,'react-native':{...native,StyleSheet:{create:x=>x},Alert:{alert(){}},Share:{share:async()=>({})}},
+    'expo-router':{router:{navigate:r=>routes.push(r),push:r=>routes.push(r),setParams:p=>Object.assign(params,p)},useLocalSearchParams:()=>params,useFocusEffect:fn=>hooks.useEffect(fn,[fn]),Stack:{Screen:'Stack.Screen'}},
+    'components/ui.tsx':Object.fromEntries(['Body','Button','Card','Centered','Chip','ErrorBox','Muted','Screen','Title'].map(x=>[x,x])),
+    'lib/preferences.ts':{usePreferences:()=>({language:'en',error:null}),preferences:{setLanguage(){}}},
+    ...mocks,
+  });
+  const Component=load(file).default;
+  const render=()=>{for(let n=0;dirty&&n<30;n++){dirty=false;index=0;tree=Component();effects.splice(0).forEach(fn=>fn());}assert(!dirty,'UI mock render settles');return tree;};
+  function find(predicate,node){if(arguments.length===1)node=render();if(Array.isArray(node))return node.flatMap(c=>find(predicate,c));if(!node?.props)return [];if(typeof node.type==='function')return find(predicate,node.type(node.props));return [...(predicate(node)?[node]:[]),...find(predicate,node.props.children),...find(predicate,node.props.ListHeaderComponent),...find(predicate,node.props.ListEmptyComponent)];};
+  const button=title=>{const b=find(n=>n.type==='Button'&&n.props.title===title)[0];assert(b,`button ${title}`);return b.props;};
+  const input=placeholder=>{const el=find(n=>n.type==='TextInput'&&n.props.placeholder===placeholder)[0];assert(el,placeholder);return el.props;};
+  const settle=async()=>{await flush();render();await flush();render();};
+  return {hooks,render,find,button,input,settle,routes,unmount:()=>cells.forEach(c=>c?.cleanup?.())};
+}
+test('Import screen edits survive screen remount without restarting extraction and cooks the reviewed version', async () => {
+  const h=importHarness(); let ui;
+  const mocks={
+    'lib/demo.ts':{useDemoMode:()=>true},'lib/supabase.ts':{supabaseConfigured:false},'expo-image-picker':{},
+    'lib/importJobs.tsx':{imports:h.controller,useImportJob:()=>ui.hooks.useSyncExternalStore(h.controller.subscribe,h.controller.getSnapshot)},
+  };
+  ui=screenHarness('app/(tabs)/import.tsx',mocks);ui.render();ui.button('Use the demo clip').onPress();ui.render();
+  ui.input('Caption').onChangeText('snapshotted');ui.render();ui.button('Extract recipe').onPress();await ui.settle();
+  ui.input('Caption').onChangeText('later reviewed caption');ui.render();
+  ui.input('Private variation notes (optional)').onChangeText('leave garlic out later');ui.render();
+  ui.button('Browse library').onPress();ui.unmount();
+  ui=screenHarness('app/(tabs)/import.tsx',mocks,{jobId:h.controller.getSnapshot().id});ui.render();
+  assert.equal(ui.input('Caption').value,'later reviewed caption');
+  assert.equal(ui.input('Private variation notes (optional)').value,'leave garlic out later');
+  assert.equal(h.controller.getSnapshot().inputs.caption,'snapshotted');assert.equal(h.calls.extract,1);
+  assert(ui.button('Confirm review & save notes').disabled);
+  h.refs.resolve();await ui.settle();assert(!ui.button('Confirm review & save notes').disabled);
+  ui.button('Confirm review & save notes').onPress();await ui.settle();
+  ui.button('Cook reviewed version').onPress();
+  assert.equal(ui.routes.at(-1).params.versionId,'import-v2');ui.unmount();
+});
+test('Library shows one pending job without its duplicate saved row and keeps another recipe cookable', async () => {
+  const h=importHarness();h.controller.start(h.inputs,false);await flush();let ui;
+  const rows=[{id:'import-recipe',title:'Duplicate',created_at:new Date().toISOString(),version_count:1,latest:1},
+    {id:'other',title:'Other meal',created_at:new Date().toISOString(),version_count:1,latest:1,search_ingredients:'tomato'}];
+  ui=screenHarness('app/(tabs)/index.tsx',{'lib/demo.ts':{useDemoMode:()=>true,setDemoMode(){}},'lib/supabase.ts':{supabaseConfigured:false},
+    'lib/demoDb.ts':{resetDemo(){}},'lib/db.ts':{listLibrary:async()=>rows,deleteRecipe:async()=>{}},
+    'lib/importJobs.tsx':{imports:h.controller,useImportJob:()=>ui.hooks.useSyncExternalStore(h.controller.subscribe,h.controller.getSnapshot)}});
+  ui.render();await ui.settle();let list=ui.find(n=>n.type==='FlatList')[0].props;
+  assert.equal(list.data.length,1);assert.equal(list.data[0].id,'other');assert(ui.button('Exit demo').disabled);
+  assert(ui.find(n=>n.type==='Chip'&&n.props.label==='review-needed').length);
+  ui.button('Processing').onPress();ui.render();list=ui.find(n=>n.type==='FlatList')[0].props;assert.equal(list.data.length,0);assert.equal(list.ListEmptyComponent,null);
+  ui.button('All').onPress();ui.input('Search titles or included ingredients').onChangeText('tomato');ui.render();
+  list=ui.find(n=>n.type==='FlatList')[0].props;assert.equal(list.data.length,1);
+  const row=list.renderItem({item:list.data[0]});const cook=ui.find(n=>n.type==='Button'&&n.props.title==='Cook',row)[0];assert(!cook.props.disabled);cook.props.onPress();assert.equal(ui.routes.at(-1),'/cook/other');
+  ui.unmount();h.refs.resolve();await flush();
+});
+test('Versions screen shares the chosen child and guards duplicate share invocations', async () => {
+  const load=loader();const r=omittedRecipe(load);const opened=deferred();const messages=[];
+  const versions=[{id:'v2',number:2,recipe_id:'r',recipe_json:r,created_at:new Date().toISOString(),diff_json:[],notes:'private'},
+    {id:'v1',number:1,recipe_id:'r',recipe_json:recipe(load),created_at:new Date().toISOString(),diff_json:[]}];
+  const native=Object.fromEntries(['FlatList','Pressable','Text','View'].map(x=>[x,x]));
+  const ui=screenHarness('app/history/[recipeId].tsx',{'lib/db.ts':{getRecipeTitle:async()=>r.title,getVersions:async()=>versions,setBestVersion:async()=>{}},
+    'react-native':{...native,StyleSheet:{create:x=>x},Share:{share:async o=>{messages.push(o.message);return opened.promise;}}}},{recipeId:'r'});
+  ui.render();await ui.settle();const list=ui.find(n=>n.type==='FlatList')[0].props;
+  const row=list.renderItem({item:versions[0]});const share=ui.find(n=>n.type==='Button'&&n.props.title==='Share v2 as text',row)[0];
+  share.props.onPress();share.props.onPress();assert.equal(messages.length,1);assert.match(messages[0],/v2/);assert.match(messages[0],/Intentionally omitted.*garlic/);assert(!messages[0].includes('private'));
+  opened.resolve({});await ui.settle();ui.unmount();
+});
+test('Spanish utterance never reuses an English audio cache entry and a language switch cancels pending English generation', async () => {
+  const v=voiceSetup({},async()=>{},[{language:'es-ES',identifier:'es'}]);
+  const english=v.speaker.say('Same words','step');await v.speaker.stopAll();
+  await v.speaker.say('Same words','step',undefined,{language:'es',fallbackText:'English fallback'});
+  v.resolveAudio(v.requests[0]);await english;
+  assert.equal(v.requests.length,1);assert.equal(v.played.length,0);assert.equal(v.speech[0].options.language,'es-ES');
+});
+
+test('bounded restriction reminders handle names, aliases, compounds and negated claims without promising safety', () => {
+  const load=loader();const match=load('lib/restrictions.ts').ingredientReminders;
+  assert.equal(match([{name:'peanuts'}],['peanut'])[0].restriction,'peanut');
+  assert.match(match([{name:'sodium caseinate'}],['milk'])[0].reason,/caseinate/);
+  assert.equal(match([{name:'groundnut oil'}],['peanut']).length,1);
+  assert.equal(match([{name:'maní'}],['peanut']).length,1);
+  assert.equal(match([{name:'nutmeg'}],['peanut']).length,0);
+  const unknown=match([{name:'mystery sauce'}],['milk']);assert(unknown[0].unknown);assert.match(unknown[0].reason,/contents are unknown/);
+  assert.equal(match([{name:'peanut-free sauce'}],['peanut']).length,1);
+  assert(match([{name:'milk',omitted:true}],['milk'])[0].omitted);
+  assert.equal(match([{name:'tomato'}],['peanut']).length,0);
+});
+test('restriction preferences persist together with language; tampered keys are rejected and review keys change with ingredients/settings', async () => {
+  const load=loader();const Store=load('lib/preferencesStore.ts').PreferencesStore;let disk='{"language":"es"}';
+  const s=new Store({read:async()=>disk,write:t=>{disk=t;}},()=>{});await s.load();s.setRestrictions(['milk','peanut']);s.setLanguage('en');
+  assert.deepEqual(JSON.parse(disk),{language:'en',restrictions:['milk','peanut']});
+  const restored=new Store({read:async()=>disk,write(){}},()=>{});await restored.load();assert.deepEqual(plain(restored.getSnapshot().restrictions),['milk','peanut']);
+  const corrupt=new Store({read:async()=>'{"language":"en","restrictions":["__proto__"]}',write(){}},()=>{});await corrupt.load();assert.match(corrupt.getSnapshot().error,/Invalid restriction/);
+  const key=load('lib/restrictions.ts').reminderReviewKey;const ingredients=[{name:'milk',qty:'1',unit:'cup'}];
+  assert.notEqual(key('v1',ingredients,['milk']),key('v2',ingredients,['milk']));
+  assert.notEqual(key('v1',ingredients,['milk']),key('v1',[{...ingredients[0],omitted:true}],['milk']));
+  assert.notEqual(key('v1',ingredients,['milk']),key('v1',ingredients,['peanut']));
+});
+test('extracted import requires acknowledgement for matching restrictions and physical removal stays disabled', async () => {
+  const h=importHarness();let ui;
+  ui=screenHarness('app/(tabs)/import.tsx',{'lib/demo.ts':{useDemoMode:()=>true},'lib/supabase.ts':{supabaseConfigured:false},'expo-image-picker':{},
+    'lib/preferences.ts':{usePreferences:()=>({language:'en',restrictions:['wheat']})},
+    'lib/importJobs.tsx':{imports:h.controller,useImportJob:()=>ui.hooks.useSyncExternalStore(h.controller.subscribe,h.controller.getSnapshot)}});
+  h.controller.start(h.inputs,false);await flush();h.refs.resolve();await flush();ui.render();
+  assert(ui.button('Confirm review & save notes').disabled);assert(ui.button('Remove matched items (unavailable)').disabled);
+  ui.button('Continue with review acknowledgement').onPress();ui.render();assert(!ui.button('Confirm review & save notes').disabled);
+  ui.button('Confirm review & save notes').onPress();await ui.settle();assert.equal(h.controller.getSnapshot().stage,'ready');
+  assert(ui.button('Cook reviewed version').disabled); // selected saved version gets its own review acknowledgement
+  ui.button('Continue with review acknowledgement').onPress();ui.render();assert(!ui.button('Cook reviewed version').disabled);ui.unmount();
+});
+test('cook pauses coaching/speech for compound ingredient review, allows manual navigation, and resumes only on acknowledgement', async () => {
+  const h=cookHarness({restrictions:['wheat']});h.render();await new Promise(r=>setTimeout(r,100));await h.settle();
+  assert.equal(h.loops.length,0);assert.equal(h.spoken.length,0);
+  assert(h.button('Remove matched items (unavailable)').disabled);assert(h.button("I'm done").disabled);
+  h.button('Next step').onPress();await h.settle();assert.equal(h.spoken.length,0);
+  h.button('Continue with review acknowledgement').onPress();await h.settle();
+  assert(h.loops.length>0);assert(h.spoken.length>0);assert(!h.button("I'm done").disabled);
+  h.unmount();
+});
+
+test('public attribution survives a later ingredient child while parent private import notes stay excluded', async () => {
+  const load=loader();const db=load('lib/demoDb.ts').demoDb;const tools=load('lib/libraryTools.ts');const ids=load('lib/demoData.ts').DEMO_IDS;
+  const parent=await db.saveVersion({recipeId:ids.recipe,parentId:ids.version1,recipe:recipe(load),diff:[],rating:null,notes:JSON.stringify({import_caption:'PRIVATE CAPTION',variation_notes:'PRIVATE VARIATION',source_attribution:'@original-creator'})});
+  const adapted=omittedRecipe(load);const child=await db.saveVersion({recipeId:ids.recipe,parentId:parent.id,recipe:adapted,diff:[],rating:null,notes:'private change note'});
+  const shared=tools.shareVersionText(child);assert.match(shared,/@original-creator/);assert(!shared.includes('PRIVATE'));assert(!shared.includes('private change note'));
+  assert(!child.notes.includes('PRIVATE CAPTION'));assert.match(tools.versionNotesLines(child.notes).join(' '),/private change note/);
+});
+test('root import alerts open the matching result after replacement, and failure alerts open recovery', async () => {
+  const h=importHarness();const alerts=[];const routes=[];let cleanup;let fail=false;
+  const load=loader({react:{useEffect:fn=>{cleanup=fn();}},'react-native':{Alert:{alert:(title,message,buttons)=>alerts.push({title,message,buttons})}},
+    'expo-router':{router:{navigate:r=>routes.push(r),push:r=>routes.push(r)}},'lib/db.ts':{...h.deps},'lib/refFrames.ts':{uploadRefFrames:h.deps.frames},
+    'lib/supabase.ts':{invokeFn:async()=>{if(fail)throw Error('extraction response failed');return {ok:true,version_id:'notice-v1',recipe:h.r};}}});
+  const runtime=load('lib/importJobs.tsx');assert.equal(runtime.ImportJobs({children:'navigation'}),'navigation');
+  runtime.imports.start(h.inputs,false);await flush();assert.match(alerts[0].title,/review needed/);
+  const first=runtime.imports.getSnapshot();alerts[0].buttons[1].onPress();assert.equal(routes[0].params.jobId,first.id);
+  h.refs.resolve();await flush();await runtime.imports.applyReview(h.inputs);
+  runtime.imports.start(h.inputs,false);await flush();alerts[0].buttons[1].onPress();assert.equal(routes.at(-1),'/history/import-recipe');
+  await runtime.imports.applyReview(h.inputs);fail=true;runtime.imports.start(h.inputs,false);await flush();
+  assert.equal(alerts.at(-1).title,'Import needs attention');alerts.at(-1).buttons[1].onPress();assert.equal(routes.at(-1).params.jobId,runtime.imports.getSnapshot().id);
+  cleanup();
+  const failed=[];const g=importHarness({extract:async()=>{throw Error('failed extraction');}});g.controller.onNotice(j=>failed.push(j));g.controller.start(g.inputs,false);await flush();assert.equal(failed[0].stage,'failed');
+});
+
+test('language switch cancels a delayed step-navigation speech callback before it can enqueue old speech', async () => {
+  const h=cookHarness();h.render();await new Promise(r=>setTimeout(r,100));await h.settle();
+  const stopping=deferred();h.voice.stopAll=async()=>{h.voice.revision++;await stopping.promise;};
+  h.spoken.length=0;h.button('Next step').onPress();h.render();
+  h.pressLabel('Preset recipe guidance');h.button('Español').onPress();h.render();
+  stopping.resolve();await h.settle();assert.equal(h.spoken.length,0);
+  h.button('¿Cuánto agrego?').onPress();await h.settle();assert(h.spoken.length>0);h.unmount();
 });
