@@ -1,0 +1,194 @@
+{
+  "ok": true,
+  "diff": [
+    {
+      "type": "changed_qty",
+      "step_n": 4,
+      "field": "soy sauce",
+      "from": "2 tbsp",
+      "to": "about 3 tbsp",
+      "confidence": 0.78
+    },
+    {
+      "type": "changed_time",
+      "step_n": 3,
+      "field": "duration_sec",
+      "from": "60",
+      "to": "90",
+      "confidence": 0.7
+    }
+  ],
+  "proposed_version": {
+    "title": "Garlic Soy Butter Noodles",
+    "source_summary": "The creator fries garlic in butter, builds a soy-honey sauce, and tosses it with boiled noodles and scallions.",
+    "servings": 2,
+    "total_minutes": 15,
+    "ingredients": [
+      {
+        "name": "noodles",
+        "qty": "200",
+        "unit": "g",
+        "confidence": 0.55,
+        "evidence": "visual"
+      },
+      {
+        "name": "butter",
+        "qty": "2",
+        "unit": "tbsp",
+        "confidence": 0.9,
+        "evidence": "spoken"
+      },
+      {
+        "name": "garlic",
+        "qty": "4",
+        "unit": "cloves",
+        "confidence": 0.85,
+        "evidence": "spoken"
+      },
+      {
+        "name": "soy sauce",
+        "qty": "3",
+        "unit": "tbsp",
+        "confidence": 0.9,
+        "evidence": "spoken"
+      },
+      {
+        "name": "honey",
+        "qty": "1",
+        "unit": "tbsp",
+        "confidence": 0.5,
+        "evidence": "visual"
+      },
+      {
+        "name": "chili flakes",
+        "qty": "1",
+        "unit": "tsp",
+        "confidence": 0.45,
+        "evidence": "visual"
+      },
+      {
+        "name": "scallions",
+        "qty": "2",
+        "unit": "stalks",
+        "confidence": 0.6,
+        "evidence": "visual"
+      },
+      {
+        "name": "water",
+        "qty": "1",
+        "unit": "L",
+        "confidence": 0.4,
+        "evidence": "inferred"
+      }
+    ],
+    "steps": [
+      {
+        "n": 1,
+        "text": "Boil the noodles in salted water until just tender, then drain.",
+        "ingredients": [
+          "noodles",
+          "water"
+        ],
+        "action": "simmer",
+        "duration_sec": 240,
+        "visual_cue": "noodles loose and glossy, no white core",
+        "ref_frame_sec": 6,
+        "common_mistakes": [
+          "overcooking until mushy"
+        ]
+      },
+      {
+        "n": 2,
+        "text": "Melt the butter in a pan over medium heat.",
+        "ingredients": [
+          "butter"
+        ],
+        "action": "heat",
+        "duration_sec": 45,
+        "visual_cue": "butter fully melted with light foam, not browned",
+        "ref_frame_sec": 10.5,
+        "common_mistakes": [
+          "heat too high, butter browns"
+        ]
+      },
+      {
+        "n": 3,
+        "text": "Add minced garlic and fry until fragrant and pale golden.",
+        "ingredients": [
+          "garlic"
+        ],
+        "action": "fry",
+        "duration_sec": 90,
+        "visual_cue": "garlic pale golden at the edges, not brown",
+        "ref_frame_sec": 16,
+        "common_mistakes": [
+          "burning the garlic"
+        ]
+      },
+      {
+        "n": 4,
+        "text": "Pour in the soy sauce and honey, stir to combine.",
+        "ingredients": [
+          "soy sauce",
+          "honey"
+        ],
+        "action": "add",
+        "duration_sec": 20,
+        "visual_cue": "dark glossy sauce bubbling gently",
+        "ref_frame_sec": 21,
+        "common_mistakes": [
+          "too much soy, sauce turns salty"
+        ]
+      },
+      {
+        "n": 5,
+        "text": "Add chili flakes and simmer until the sauce thickens slightly.",
+        "ingredients": [
+          "chili flakes"
+        ],
+        "action": "simmer",
+        "duration_sec": 60,
+        "visual_cue": "sauce coats the spoon, small slow bubbles",
+        "ref_frame_sec": 27.5,
+        "common_mistakes": []
+      },
+      {
+        "n": 6,
+        "text": "Toss the drained noodles in the sauce until fully coated.",
+        "ingredients": [
+          "noodles"
+        ],
+        "action": "stir",
+        "duration_sec": 45,
+        "visual_cue": "every strand glossy brown, no sauce pooling",
+        "ref_frame_sec": 34,
+        "common_mistakes": [
+          "adding wet noodles, sauce goes thin"
+        ]
+      },
+      {
+        "n": 7,
+        "text": "Plate and top with sliced scallions.",
+        "ingredients": [
+          "scallions"
+        ],
+        "action": "plate",
+        "duration_sec": null,
+        "visual_cue": "noodles piled high with green scallions on top",
+        "ref_frame_sec": 40,
+        "common_mistakes": []
+      }
+    ],
+    "equipment": [
+      "pot",
+      "frying pan",
+      "tongs"
+    ],
+    "warnings": [
+      "Hot pan: sauce will spit when it hits the butter."
+    ],
+    "notes": "Garlic went a bit dark, still tasted great."
+  },
+  "spoken_recap": "You used about a tablespoon more soy and fried the garlic longer than the video. Save as version 2?",
+  "suggestion": null
+}

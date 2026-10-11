@@ -1,15 +1,17 @@
 // coach-frame: per-frame live coaching with Gemini Flash.
 // Body: { recipe_id, cook_id, step_n, user_frame_b64, already_detected, elapsed_sec }
+// STUB_MODE=1 returns sample.json without calling Gemini.
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
 import { COACH_FRAME_SYSTEM, coachFrameUser } from '../_shared/prompts.ts';
 import { CoachEventSchema, parseModelJson } from '../_shared/guards.ts';
-import { geminiGenerate } from '../_shared/gemini.ts';
+import { geminiGenerate, bytesToBase64, STUB_MODE, type Part } from '../_shared/gemini.ts';
+import sample from './sample.json' with { type: 'json' };
 
 const MODEL = Deno.env.get('GEMINI_COACH_MODEL') ?? 'gemini-3.8-flash'; // try gemini-3.5-flash-lite if latency > 1.5 s
 const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!);
 const refCache = new Map<string, string>(); // `${versionId}:${stepN}` -> base64 jpeg
 
-const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, content-type' };
+const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type' };
 const json = (b: unknown) => Response.json(b, { headers: cors });
 
 Deno.serve(async req => {
@@ -17,24 +19,34 @@ Deno.serve(async req => {
   const t0 = Date.now();
   try {
     const { cook_id, step_n, user_frame_b64, already_detected = [], elapsed_sec = 0 } = await req.json();
+    if (!cook_id || !step_n || !user_frame_b64) return json({ ok: false, error: 'cook_id, step_n, user_frame_b64 required' });
+
+    if (STUB_MODE) {
+      await sb.from('cook_events').insert({ cook_id, step_n, event: sample.event });
+      return json(sample);
+    }
 
     const { data: cook } = await sb.from('cooks').select('base_version_id').eq('id', cook_id).single();
-    const { data: ver } = await sb.from('versions').select('recipe_json').eq('id', cook!.base_version_id).single();
-    const step = ver!.recipe_json.steps.find((s: any) => s.n === step_n);
+    if (!cook) return json({ ok: false, error: 'cook not found' });
+    const { data: ver } = await sb.from('versions').select('recipe_json').eq('id', cook.base_version_id).single();
+    // deno-lint-ignore no-explicit-any
+    const step = ver?.recipe_json?.steps?.find((s: any) => s.n === step_n);
     if (!step) return json({ ok: false, error: 'step not found' });
 
-    const key = `${cook!.base_version_id}:${step_n}`;
+    const key = `${cook.base_version_id}:${step_n}`;
     let ref = refCache.get(key);
     if (!ref) {
-      const { data: rf } = await sb.from('ref_frames').select('storage_path').eq('version_id', cook!.base_version_id).eq('step_n', step_n).maybeSingle();
+      const { data: rf } = await sb.from('ref_frames').select('storage_path').eq('version_id', cook.base_version_id).eq('step_n', step_n).maybeSingle();
       if (rf) {
         const { data: blob } = await sb.storage.from('frames').download(rf.storage_path);
-        ref = btoa(String.fromCharCode(...new Uint8Array(await blob!.arrayBuffer())));
-        refCache.set(key, ref);
+        if (blob) {
+          ref = bytesToBase64(new Uint8Array(await blob.arrayBuffer()));
+          refCache.set(key, ref);
+        }
       }
     }
 
-    const parts: any[] = [];
+    const parts: Part[] = [];
     if (ref) parts.push({ text: 'REFERENCE (creator, end of this step):' }, { inline_data: { mime_type: 'image/jpeg', data: ref } });
     parts.push({ text: 'USER (live):' }, { inline_data: { mime_type: 'image/jpeg', data: user_frame_b64 } });
     parts.push({ text: coachFrameUser({ stepText: step.text, expectedIngredients: step.ingredients, alreadyDetected: already_detected, elapsedSec: elapsed_sec, visualCue: step.visual_cue, hasReference: !!ref }) });

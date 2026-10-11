@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "event": {
+    "ingredient_added": "garlic",
+    "qty_estimate": "about 4 cloves",
+    "step_state": "in_progress",
+    "doneness": "under",
+    "deviation": null,
+    "action": null,
+    "severity": "info",
+    "confidence": 0.82
+  }
+}

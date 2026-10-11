@@ -162,6 +162,29 @@ Rules:
 - If rating history shows a pattern (e.g. higher ratings with less sugar), state it plainly in suggestion. Otherwise null.
 - Output JSON only.`;
 
+export function recapUser(opts: {
+  recipe: unknown;
+  timeline: unknown;          // compact per-step summary built by the recap Edge Function
+  rating: number | null;
+  notes: string;
+  history: unknown;           // earlier versions of this recipe with ratings/notes
+  nextVersion: number;
+}) {
+  return `Original recipe JSON:
+${JSON.stringify(opts.recipe)}
+
+Detection timeline, one entry per step (seconds spent, ingredients seen going in with quantity estimates, deviations the coach flagged, final state):
+${JSON.stringify(opts.timeline)}
+
+Cook's rating out of 10: ${opts.rating ?? "not given"}
+Cook's notes: ${opts.notes || "(none)"}
+
+Earlier versions of this recipe with their ratings and notes (use for the suggestion field; null if no pattern):
+${JSON.stringify(opts.history)}
+
+The proposed version will be saved as version ${opts.nextVersion}. Return the JSON.`;
+}
+
 // ---------------------------------------------------------------------------
 // 5. SPOKEN LINE TEMPLATES (no model call; used by AlertGate)
 // ---------------------------------------------------------------------------
