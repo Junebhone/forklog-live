@@ -66,3 +66,7 @@ create policy "open" on versions for all using (true) with check (true);
 create policy "open" on cooks for all using (true) with check (true);
 create policy "open" on cook_events for all using (true) with check (true);
 create policy "open" on ref_frames for all using (true) with check (true);
+
+-- storage: the app uploads clips and reference frames with the anon key.
+create policy "open videos frames" on storage.objects for all
+  using (bucket_id in ('videos','frames')) with check (bucket_id in ('videos','frames'));
